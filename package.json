@@ -1,0 +1,9 @@
+{
+  "name": "gh-pr-reviewer",
+  "scripts": {
+    "start": "nodemon --watch * --ext go --exec \"go run -tags=!exec ./...\""
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  }
+}
