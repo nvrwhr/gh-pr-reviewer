@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 
@@ -283,6 +284,9 @@ func generateReviewWithAssistant(pr *github.PullRequest, files []*github.CommitF
 	if err != nil {
 		return "", nil, "", err
 	}
+
+	log.Println(`-------------------------------------Raw response`, responseText)
+	log.Println(`-------------------------------------File comments`, len(reviewComments))
 
 	return responseText, reviewComments, action, nil
 }
