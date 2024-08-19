@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
 	"regexp"
@@ -15,6 +17,12 @@ import (
 	"github.com/sashabaranov/go-openai"
 	"golang.org/x/oauth2"
 )
+
+type SavedReview struct {
+	Review         string                       `json:"review"`
+	ReviewComments []*github.DraftReviewComment `json:"review_comments"`
+	Action         string                       `json:"action"`
+}
 
 func main() {
 	// Load environment variables from .env file
@@ -29,11 +37,12 @@ func main() {
 	repo := flag.String("repo", "", "Repository name (e.g., 'hello-world')")
 	prNumber := flag.Int("pr", 0, "Pull Request number (e.g., 42)")
 	dryRun := flag.Bool("dry", false, "Generate review without posting to GitHub")
+	forcedry := flag.Bool("forcedry", false, "Force overwrite the last local dry run review")
 	flag.Parse()
 
 	// Check required arguments
 	if *owner == "" || *repo == "" || *prNumber == 0 {
-		fmt.Println("Usage: gh-pr-reviewer -owner=<owner> -repo=<repo> -pr=<pr-number> [--dry]")
+		fmt.Println("Usage: gh-pr-reviewer -owner=<owner> -repo=<repo> -pr=<pr-number> [--dry] [--forcedry]")
 		os.Exit(1)
 	}
 
@@ -50,6 +59,26 @@ func main() {
 	if err != nil {
 		fmt.Printf("Error fetching PR details: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Construct the file path for the review
+	reviewFilePath := fmt.Sprintf("reviews/%s-%s-review.json", *repo, *pr.Head.SHA)
+
+	// Check if a review file exists for the current head SHA
+	if !*forcedry && *dryRun {
+		if _, err := os.Stat(reviewFilePath); err == nil {
+			// File exists, load the review from the file
+			savedReview, err := loadReviewFromFile(reviewFilePath)
+			if err == nil {
+				log.Println("Using saved review from file.")
+				logSavedReview(savedReview)
+
+				if *dryRun {
+					log.Println("Dry run: Review not posted to GitHub.")
+					return
+				}
+			}
+		}
 	}
 
 	// Fetch the current user (the reviewer)
@@ -116,16 +145,18 @@ func main() {
 	// Output the generated review
 	log.Println("------- Generated Review:")
 	log.Println(review)
-	log.Println(`------- File comments:`)
-
+	log.Println("------- File comments:")
 	for _, comment := range reviewComments {
 		log.Printf("File: %s, Line: %d\nComment: %s\n", *comment.Path, *comment.Position, *comment.Body)
 	}
-
-	log.Println(`-------`)
+	log.Println("-------")
 
 	if *dryRun {
-		// If dry run, don't post the review, just output the results
+		// Save the review to a file during dry run
+		err = saveReviewToFile(reviewFilePath, review, reviewComments, action)
+		if err != nil {
+			log.Printf("Error saving review to file: %v\n", err)
+		}
 		log.Println("Dry run: Review not posted to GitHub.")
 		return
 	}
@@ -174,6 +205,46 @@ func main() {
 		}
 		fmt.Println("Review posted successfully!")
 	}
+}
+
+func logSavedReview(savedReview *SavedReview) {
+	log.Println("------- Loaded Review:")
+	log.Println(savedReview.Review)
+	log.Println("------- File comments:")
+	for _, comment := range savedReview.ReviewComments {
+		log.Printf("File: %s, Line: %d\nComment: %s\n", *comment.Path, *comment.Position, *comment.Body)
+	}
+	log.Println("-------")
+}
+
+func saveReviewToFile(filePath, review string, reviewComments []*github.DraftReviewComment, action string) error {
+	savedReview := SavedReview{
+		Review:         review,
+		ReviewComments: reviewComments,
+		Action:         action,
+	}
+
+	data, err := json.MarshalIndent(savedReview, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return ioutil.WriteFile(filePath, data, 0644)
+}
+
+func loadReviewFromFile(filePath string) (*SavedReview, error) {
+	data, err := ioutil.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	var savedReview SavedReview
+	err = json.Unmarshal(data, &savedReview)
+	if err != nil {
+		return nil, err
+	}
+
+	return &savedReview, nil
 }
 
 // getPendingReview checks if there's a pending review for the PR
@@ -414,25 +485,6 @@ func extractComments(responseText string, fileMap map[string]*github.CommitFile)
 	}
 
 	return reviewComments, nil
-}
-
-func parseLineComment(linePart string) (int, string) {
-	// Extract the line number and comment from a line string
-	lineNumberStr := ""
-	comment := ""
-	if strings.HasPrefix(linePart, "Line") {
-		parts := strings.SplitN(linePart, ":", 2)
-		if len(parts) == 2 {
-			lineNumberStr = strings.TrimSpace(strings.TrimPrefix(parts[0], "Line "))
-			comment = strings.TrimSpace(strings.TrimPrefix(strings.TrimSuffix(strings.TrimSpace(parts[1]), `"`), `"`))
-		}
-	}
-
-	lineNumber, err := strconv.Atoi(lineNumberStr)
-	if err != nil {
-		return 0, ""
-	}
-	return lineNumber, comment
 }
 
 // postReviewWithComments posts a review on the PR with the determined action (approve or request changes), including line comments
