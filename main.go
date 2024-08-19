@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/google/go-github/v55/github"
@@ -47,6 +46,13 @@ func main() {
 	pr, _, err := client.PullRequests.Get(ctx, *owner, *repo, *prNumber)
 	if err != nil {
 		fmt.Printf("Error fetching PR details: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Fetch the current user (the reviewer)
+	user, _, err := client.Users.Get(ctx, "")
+	if err != nil {
+		fmt.Printf("Error fetching user details: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -117,24 +123,48 @@ func main() {
 		return
 	}
 
-	// Determine the action based on the assistant's recommendation and PR checks
-	var state string
-	if action == "approve" && checksPassed {
-		state = "APPROVE"
-	} else if action == "request_changes" || !checksPassed {
-		state = "REQUEST_CHANGES"
-	} else {
-		fmt.Println("Assistant recommended approval, but tests are failing. Requesting changes instead.")
-		state = "REQUEST_CHANGES"
-	}
+	// Check if the reviewer is the PR author
+	isSelfReview := user.GetLogin() == pr.User.GetLogin()
 
-	// Post the review if not a dry run
-	err = postReviewWithComments(client, ctx, *owner, *repo, *prNumber, review, reviewComments, state)
-	if err != nil {
-		fmt.Printf("Error posting review: %v\n", err)
-		os.Exit(1)
+	if isSelfReview {
+		// Post the review as a comment instead
+		commentBody := review
+		if action == "approve" {
+			commentBody += "\n\n**Note:** This is a self-approved PR."
+		} else if action == "request_changes" {
+			commentBody += "\n\n**Note:** This is a self-requested change."
+		}
+
+		comment := &github.IssueComment{
+			Body: github.String(commentBody),
+		}
+
+		_, _, err := client.Issues.CreateComment(ctx, *owner, *repo, *prNumber, comment)
+		if err != nil {
+			fmt.Printf("Error posting comment: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Self-review posted as a comment.")
+	} else {
+		// Determine the action based on the assistant's recommendation and PR checks
+		var state string
+		if action == "approve" && checksPassed {
+			state = "APPROVE"
+		} else if action == "request_changes" || !checksPassed {
+			state = "REQUEST_CHANGES"
+		} else {
+			fmt.Println("Assistant recommended approval, but tests are failing. Requesting changes instead.")
+			state = "REQUEST_CHANGES"
+		}
+
+		// Post the review if not a dry run
+		err = postReviewWithComments(client, ctx, *owner, *repo, *prNumber, review, reviewComments, state)
+		if err != nil {
+			fmt.Printf("Error posting review: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Review posted successfully!")
 	}
-	fmt.Println("Review posted successfully!")
 }
 
 // getPendingReview checks if there's a pending review for the PR
@@ -187,21 +217,17 @@ func generateReviewWithAssistant(pr *github.PullRequest, files []*github.CommitF
 
 	// Construct the full prompt with all file changes
 	var fileChanges []string
-	fileMap := make(map[string]bool)
+	fileMap := make(map[string]*github.CommitFile)
 	for _, file := range files {
 		if file.Patch != nil {
 			fileChanges = append(fileChanges, fmt.Sprintf("File: %s\nPatch:\n%s", *file.Filename, *file.Patch))
-			fileMap[*file.Filename] = true
+			fileMap[*file.Filename] = file
 		}
 	}
 
 	combinedChanges := strings.Join(fileChanges, "\n\n")
 	prompt := fmt.Sprintf(`
-	A developer has submitted a pull request (PR) with the following details:
-	
-	Title: %s
-	Author: %s
-	Description: %s
+	PR %s by %s: %s
 	
 	The following files were changed:
 	%s
@@ -234,7 +260,7 @@ func generateReviewWithAssistant(pr *github.PullRequest, files []*github.CommitF
 	}
 
 	// Example: Parse the response for line comments and overall feedback
-	var reviewComments []*github.DraftReviewComment
+	// var reviewComments []*github.DraftReviewComment
 
 	// Mocked comment parsing logic; in reality, you would parse responseText
 	// mockComment := "This line could benefit from better error handling."
@@ -253,31 +279,54 @@ func generateReviewWithAssistant(pr *github.PullRequest, files []*github.CommitF
 	// 	}
 	// }
 
+	reviewComments, err := extractComments(responseText, fileMap)
+	if err != nil {
+		return "", nil, "", err
+	}
+
 	return responseText, reviewComments, action, nil
 }
 
-func saveReviewToFile(prNumber int, review string) error {
-	reviewDir := "reviews"
-	if err := os.MkdirAll(reviewDir, os.ModePerm); err != nil {
-		return err
+func extractComments(responseText string, fileMap map[string]*github.CommitFile) ([]*github.DraftReviewComment, error) {
+	var reviewComments []*github.DraftReviewComment
+
+	// Example logic to parse responseText and map comments to files and lines
+	// This logic should be adapted to match how the assistant's response is structured
+	lines := strings.Split(responseText, "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(strings.ToLower(line), "file:") {
+			parts := strings.SplitN(line, ":", 3)
+			if len(parts) == 3 {
+				filePath := strings.TrimSpace(parts[1])
+				if _, ok := fileMap[filePath]; ok {
+					// Assuming the next line contains a comment with a line number
+					// Example: "Line 12: This line could benefit from better error handling."
+					if strings.Contains(lines[1], "Line") {
+						commentParts := strings.SplitN(lines[1], ":", 2)
+						if len(commentParts) == 2 {
+							lineNumber, err := extractLineNumber(commentParts[0])
+							if err == nil {
+								reviewComments = append(reviewComments, &github.DraftReviewComment{
+									Path:     github.String(filePath),
+									Position: github.Int(lineNumber),
+									Body:     github.String(strings.TrimSpace(commentParts[1])),
+								})
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 
-	reviewFile := filepath.Join(reviewDir, fmt.Sprintf("pr-%d.txt", prNumber))
-	return os.WriteFile(reviewFile, []byte(review), 0644)
+	return reviewComments, nil
 }
 
-func loadReviewFromFile(prNumber int) (string, error) {
-	reviewFile := filepath.Join("reviews", fmt.Sprintf("pr-%d.txt", prNumber))
-	content, err := os.ReadFile(reviewFile)
-	if err != nil {
-		return "", err
-	}
-	return string(content), nil
-}
-
-func invalidatePreviousReview(prNumber int) error {
-	reviewFile := filepath.Join("reviews", fmt.Sprintf("pr-%d.txt", prNumber))
-	return os.Remove(reviewFile)
+// extractLineNumber extracts line number from a string like "Line 12"
+func extractLineNumber(lineStr string) (int, error) {
+	var lineNumber int
+	_, err := fmt.Sscanf(lineStr, "Line %d", &lineNumber)
+	return lineNumber, err
 }
 
 // postReviewWithComments posts a review on the PR with the determined action (approve or request changes), including line comments
