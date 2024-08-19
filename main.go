@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/google/go-github/v55/github"
@@ -112,15 +114,19 @@ func main() {
 	}
 
 	// Output the generated review
-	fmt.Println("Generated Review:")
-	fmt.Println(review)
+	log.Println("(`------- Generated Review:")
+	log.Println(review)
+	log.Println(`------- File comments`)
+
 	for _, comment := range reviewComments {
-		fmt.Printf("File: %s, Line: %d\nComment: %s\n", *comment.Path, *comment.Position, *comment.Body)
+		log.Printf("File: %s, Line: %d\nComment: %s\n", *comment.Path, *comment.Position, *comment.Body)
 	}
+
+	log.Println(`-------`)
 
 	if *dryRun {
 		// If dry run, don't post the review, just output the results
-		fmt.Println("Dry run: Review not posted to GitHub.")
+		log.Println("Dry run: Review not posted to GitHub.")
 		return
 	}
 
@@ -136,15 +142,18 @@ func main() {
 			commentBody += "\n\n**Note:** This is a self-requested change."
 		}
 
-		comment := &github.IssueComment{
-			Body: github.String(commentBody),
+		// Use the PullRequests.CreateReview method to post review comments directly on lines
+		reviewEvent := &github.PullRequestReviewRequest{
+			Body:     github.String(commentBody),
+			Event:    github.String("COMMENT"), // "COMMENT" will not change the state of the PR
+			Comments: reviewComments,           // Use the existing review comments
 		}
 
-		_, _, err := client.Issues.CreateComment(ctx, *owner, *repo, *prNumber, comment)
+		_, _, err := client.PullRequests.CreateReview(ctx, *owner, *repo, *prNumber, reviewEvent)
 		if err != nil {
-			fmt.Printf("Error posting comment: %v\n", err)
-			os.Exit(1)
+			log.Fatalf("\n\n GH Review self-review comments: %v\n", err)
 		}
+
 		fmt.Println("Self-review posted as a comment.")
 	} else {
 		// Determine the action based on the assistant's recommendation and PR checks
@@ -161,8 +170,7 @@ func main() {
 		// Post the review if not a dry run
 		err = postReviewWithComments(client, ctx, *owner, *repo, *prNumber, review, reviewComments, state)
 		if err != nil {
-			fmt.Printf("Error posting review: %v\n", err)
-			os.Exit(1)
+			log.Fatal("Error posting review: %v\n", err)
 		}
 		fmt.Println("Review posted successfully!")
 	}
@@ -190,6 +198,36 @@ func dismissPendingReview(client *github.Client, ctx context.Context, owner, rep
 		Message: github.String(message),
 	})
 	return err
+}
+
+func simplifyPatch(files []*github.CommitFile) string {
+	var simplifiedChanges []string
+	for _, file := range files {
+		if file.Patch != nil {
+			simplifiedChanges = append(simplifiedChanges, fmt.Sprintf("File: %s\nChanges:", *file.Filename))
+			lines := strings.Split(*file.Patch, "\n")
+			lineNumber := 0
+			for _, line := range lines {
+				if strings.HasPrefix(line, "@@") {
+					// Extract line number from the diff header
+					// For example, @@ -1,3 +1,3 @@ means we need to start at line 1
+					parts := strings.Split(line, " ")
+					if len(parts) >= 3 {
+						newLineInfo := strings.Split(parts[2][1:], ",") // +1,3 becomes 1,3
+						lineNumber, _ = strconv.Atoi(newLineInfo[0])
+					}
+				} else if strings.HasPrefix(line, "+") {
+					simplifiedChanges = append(simplifiedChanges, fmt.Sprintf("+ Line %d: %s", lineNumber, strings.TrimPrefix(line, "+")))
+					lineNumber++
+				} else if strings.HasPrefix(line, "-") {
+					simplifiedChanges = append(simplifiedChanges, fmt.Sprintf("- Line %d: %s", lineNumber, strings.TrimPrefix(line, "-")))
+				} else {
+					lineNumber++
+				}
+			}
+		}
+	}
+	return strings.Join(simplifiedChanges, "\n")
 }
 
 // generateReviewWithAssistant sends all file changes in a single prompt and generates a detailed review
@@ -227,12 +265,45 @@ func generateReviewWithAssistant(pr *github.PullRequest, files []*github.CommitF
 	}
 
 	combinedChanges := strings.Join(fileChanges, "\n\n")
+	simplifiedPatch := simplifyPatch(files)
 	prompt := fmt.Sprintf(`
 	PR %s by %s: %s
 	
 	The following files were changed:
 	%s
-	`, title, author, body, combinedChanges)
+
+	advanced diff:
+	%s
+
+	Please provide a detailed code review that includes:
+1. A summary of what the PR does.
+2. Suggestions for improvements or refactoring.
+3. Potential bugs or issues to look out for. In particular files.
+
+pretify those sections
+
+4. Specific comments on lines of code where you spot bugs, issues, or things that should be changed. Include the file name and line number in your comments.
+
+	Remember to provider specific comments on lines of code where you spot bugs, issues, or things that should be changed. Comment only of problematic lines. 
+	Include the file name and line number in your comments, using the format 
+	
+	File: "<filename>", Line <line number>: "<comment>". 
+	
+	For mutliple lines please use just the first line number. If there are multiple comments in one file, please generate the comment multiple time as necessary, like that:
+
+	File: "./fileA", Line 1: "comment a" 
+	File: "./fileA", Line 2: "comment b"
+	File: "./fileB", Line 1: "comment c" 
+	
+	Where "comment a" would be your comment. 
+	I will be stripping those lines from payload to push the comments to gh, so keep them clean.
+	Please put them all those line comments into  section "Specific Comments"
+
+Finally, make a recommendation on whether this PR should be approved or if changes are required. Respond with __approve__ or __request_changes__ at the end of your review.
+
+	`, title, author, body, simplifiedPatch, combinedChanges)
+
+	// fmt.Println(`----------------------------------------Combined changes`, simplifiedPatch, combinedChanges)
 
 	resp, err := client.CreateChatCompletion(context.Background(), openai.ChatCompletionRequest{
 		Model: openai.GPT4oMini,
@@ -260,64 +331,88 @@ func generateReviewWithAssistant(pr *github.PullRequest, files []*github.CommitF
 		action = "request_changes" // Default to requesting changes if unsure
 	}
 
-	// Example: Parse the response for line comments and overall feedback
-	// var reviewComments []*github.DraftReviewComment
-
-	// Mocked comment parsing logic; in reality, you would parse responseText
-	// mockComment := "This line could benefit from better error handling."
-
-	// for _, file := range files {
-	// 	if file.Patch != nil {
-	// 		// Ensure the file exists in the PR
-	// 		if fileMap[*file.Filename] {
-	// 			// Add a comment at a specific line, assuming line 12 for example
-	// 			reviewComments = append(reviewComments, &github.DraftReviewComment{
-	// 				Path:     file.Filename,
-	// 				Position: github.Int(12), // Example line number, should be valid
-	// 				Body:     github.String(mockComment),
-	// 			})
-	// 		}
-	// 	}
-	// }
-
 	reviewComments, err := extractComments(responseText, fileMap)
 	if err != nil {
 		return "", nil, "", err
 	}
 
-	log.Println(`-------------------------------------Raw response`, responseText)
-	log.Println(`-------------------------------------File comments`, len(reviewComments))
+	responseText = removeSpecificCommentsSection(responseText)
 
 	return responseText, reviewComments, action, nil
+}
+
+func removeSpecificCommentsSection(input string) string {
+	// Define the regex pattern to match the section between `#{1,3} Specific Comments`
+	// and the next `#{1,3} <some other section>`.
+	pattern := `(?s)(?m)#{1,3}\s+Specific Comments.*?#{1,3}\s+\w+`
+
+	// Compile the regex pattern
+	re := regexp.MustCompile(pattern)
+
+	// Replace the matched section with the new section header, keeping the end section.
+	cleaned := re.ReplaceAllStringFunc(input, func(m string) string {
+		// Find the start of the next section to keep it intact
+		nextSection := regexp.MustCompile(`#{1,3}\s+\w+`).FindString(m)
+		return nextSection
+	})
+
+	return cleaned
 }
 
 func extractComments(responseText string, fileMap map[string]*github.CommitFile) ([]*github.DraftReviewComment, error) {
 	var reviewComments []*github.DraftReviewComment
 
-	// Example logic to parse responseText and map comments to files and lines
-	// This logic should be adapted to match how the assistant's response is structured
-	lines := strings.Split(responseText, "\n")
+	// Identify the start of the "Specific Comments" section
+	// ### ##
+	specificCommentsIndex := strings.Index(responseText, "# Specific Comments")
+	if specificCommentsIndex == -1 {
+		fmt.Println(responseText)
+		return reviewComments, fmt.Errorf("no 'Specific Comments' section found")
+	}
+
+	// Extract the "Specific Comments" section
+	specificComments := responseText[specificCommentsIndex:]
+
+	// Split the section into individual lines
+	lines := strings.Split(specificComments, "\n")
 	for _, line := range lines {
-		if strings.HasPrefix(strings.ToLower(line), "file:") {
-			parts := strings.SplitN(line, ":", 3)
-			if len(parts) == 3 {
-				filePath := strings.TrimSpace(parts[1])
-				if _, ok := fileMap[filePath]; ok {
-					// Assuming the next line contains a comment with a line number
-					// Example: "Line 12: This line could benefit from better error handling."
-					if strings.Contains(lines[1], "Line") {
-						commentParts := strings.SplitN(lines[1], ":", 2)
-						if len(commentParts) == 2 {
-							lineNumber, err := extractLineNumber(commentParts[0])
-							if err == nil {
-								reviewComments = append(reviewComments, &github.DraftReviewComment{
-									Path:     github.String(filePath),
-									Position: github.Int(lineNumber),
-									Body:     github.String(strings.TrimSpace(commentParts[1])),
-								})
-							}
-						}
-					}
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "File:") {
+			// Extract the file name and line number
+			parts := strings.SplitN(line, ",", 2)
+			if len(parts) == 2 {
+				filePart := strings.TrimSpace(strings.TrimPrefix(parts[0], "File: \""))
+				filePart = strings.TrimSuffix(filePart, "\"")
+				linePart := strings.TrimSpace(parts[1])
+
+				// Extract line number and comment
+				lineNumber, comment := parseLineComment(linePart)
+				if filePart != "" && lineNumber > 0 && comment != "" {
+					reviewComments = append(reviewComments, &github.DraftReviewComment{
+						Path:     &filePart,
+						Position: &lineNumber,
+						Body:     &comment,
+					})
+				}
+			}
+		}
+
+		if strings.HasPrefix(line, "- File:") {
+			// Extract the file name and line number
+			parts := strings.SplitN(line, ",", 2)
+			if len(parts) == 2 {
+				filePart := strings.TrimSpace(strings.TrimPrefix(parts[0], "File: \""))
+				filePart = strings.TrimSuffix(filePart, "\"")
+				linePart := strings.TrimSpace(parts[1])
+
+				// Extract line number and comment
+				lineNumber, comment := parseLineComment(linePart)
+				if filePart != "" && lineNumber > 0 && comment != "" {
+					reviewComments = append(reviewComments, &github.DraftReviewComment{
+						Path:     &filePart,
+						Position: &lineNumber,
+						Body:     &comment,
+					})
 				}
 			}
 		}
@@ -326,11 +421,23 @@ func extractComments(responseText string, fileMap map[string]*github.CommitFile)
 	return reviewComments, nil
 }
 
-// extractLineNumber extracts line number from a string like "Line 12"
-func extractLineNumber(lineStr string) (int, error) {
-	var lineNumber int
-	_, err := fmt.Sscanf(lineStr, "Line %d", &lineNumber)
-	return lineNumber, err
+func parseLineComment(linePart string) (int, string) {
+	// Extract the line number and comment from a line string
+	lineNumberStr := ""
+	comment := ""
+	if strings.HasPrefix(linePart, "Line") {
+		parts := strings.SplitN(linePart, ":", 2)
+		if len(parts) == 2 {
+			lineNumberStr = strings.TrimSpace(strings.TrimPrefix(parts[0], "Line "))
+			comment = strings.TrimSpace(strings.TrimPrefix(strings.TrimSuffix(strings.TrimSpace(parts[1]), `"`), `"`))
+		}
+	}
+
+	lineNumber, err := strconv.Atoi(lineNumberStr)
+	if err != nil {
+		return 0, ""
+	}
+	return lineNumber, comment
 }
 
 // postReviewWithComments posts a review on the PR with the determined action (approve or request changes), including line comments
@@ -348,7 +455,8 @@ func postReviewWithComments(client *github.Client, ctx context.Context, owner, r
 			fmt.Println("A pending review already exists. Please submit or dismiss the existing review before posting a new one: " + err.Error())
 			return nil
 		}
-		fmt.Println("GH PR post Error: " + err.Error())
+
+		log.Println("\n\n GH Review With Comments post Error: " + err.Error())
 		return err
 	}
 	return nil
