@@ -275,28 +275,35 @@ func generateReviewWithAssistant(pr *github.PullRequest, files []*github.CommitF
 	advanced diff:
 	%s
 
-	Please provide a detailed code review that includes:
-1. A summary of what the PR does (prettyfy this section).
-2. Suggestions for improvements or refactoring (prettyfy this section).
-3. Potential bugs or issues to look out for. In particular files (prettyfy this section).
+	Summary of What the PR Does: (prettyfy this section)
 
-4. Specific comments on lines of code where you spot bugs, issues, or things that should be changed. Include the file name and line number in your comments.
+Suggestions for Improvements or Refactoring: (prettyfy this section)
 
-	Remember to provider specific comments on lines of code where you spot bugs, issues, or things that should be changed. Comment only of problematic lines. 
-	Include the file name and line number in your comments, using the format 
-	
-	File: "<filename>", Line <line number>: "<comment>". 
-	
-	For mutliple lines please use just the first line number. If there are multiple comments in one file, please generate the comment multiple time as necessary, like that:
+Potential Bugs or Issues to Look Out For: (prettyfy this section)
 
-	### Specific Comments:
-	- File: "fileA", Line 1: "comment a" 
-	- File: "fileA", Line 2: "comment b"
-	- File: "fileB", Line 1: "comment c" 
-	...
-	
-	Do not change the header section name and structure. Addhere to file list structure, including the double quotes.
-	So do not change the Specific Comment section name, do not change the comment quoting.
+Specific Comments:
+
+This section should contain specific comments on lines of code where you spot bugs, issues, or things that should be changed. Only include comments on problematic lines. Use the exact format provided below for each comment, and make sure to use double quotes around filenames and comments.
+
+Format:
+- File: "filename", Line line_number: "comment"
+
+For multiple comments in the same file, use the format repeatedly for each line:
+
+Example:
+### Specific Comments:
+- File: "fileA", Line 1: "comment a"
+- File: "fileA", Line 2: "comment b"
+- File: "fileB", Line 1: "comment c"
+
+Ensure that:
+The section header remains "### Specific Comments:".
+The structure and formatting (e.g., double quotes around filenames and comments) are strictly followed.
+Do not alter or omit the double quotes.
+Each comment should start on a new line with the - symbol, followed by the word File, then the filename in double quotes, then the word Line, the line number, a colon, and finally the comment in double quotes.
+Please adhere to the formatting rules strictly, as they are critical for automated processing.
+
+Finally, make a recommendation on whether this PR should be approved or if changes are required. Respond with approve or request_changes at the end of your review.
 
 
 	
@@ -367,9 +374,9 @@ func extractComments(responseText string, fileMap map[string]*github.CommitFile)
 	var reviewComments []*github.DraftReviewComment
 
 	// Identify the start of the "Specific Comments" section
-	specificCommentsIndex := strings.Index(responseText, "Specific Comments")
+	specificCommentsIndex := strings.Index(responseText, "### Specific Comments:")
 	if specificCommentsIndex == -1 {
-		log.Println("------- no 'Specific Comments' section found")
+		log.Println("No 'Specific Comments' section found")
 		return reviewComments, nil
 	}
 
@@ -380,29 +387,28 @@ func extractComments(responseText string, fileMap map[string]*github.CommitFile)
 	lines := strings.Split(specificComments, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		// Define regex to match different patterns
-		re := regexp.MustCompile(`(?i)-?\s*\**File:\s*[` + "`" + `"']?([^,` + "`" + `"']+)['"]?,\s*Line\s*(\d+)\**:?\s*(.*)`)
+
+		// Define regex to match the File, Line, and Comment format
+		re := regexp.MustCompile(`- File: "([^"]+)", Line (\d+): "([^"]+)"`)
 
 		if matches := re.FindStringSubmatch(line); matches != nil {
-			filePart := strings.TrimSpace(matches[1])
-			lineNumberStr := strings.TrimSpace(matches[2])
-			comment := strings.TrimSpace(matches[3])
-
-			lineNumber, err := strconv.Atoi(lineNumberStr)
+			filePart := matches[1]
+			lineNumber, err := strconv.Atoi(matches[2])
 			if err != nil {
-				log.Printf("Invalid line number '%s' in line: %s", lineNumberStr, line)
+				log.Printf("Invalid line number '%s' in line: %s", matches[2], line)
 				continue
 			}
+			comment := matches[3]
 
-			// Validate file and line number
-			if _, exists := fileMap[filePart]; exists && lineNumber > 0 && comment != "" {
+			// Validate file part against the file map
+			if _, exists := fileMap[filePart]; exists {
 				reviewComments = append(reviewComments, &github.DraftReviewComment{
 					Path:     &filePart,
 					Position: &lineNumber,
 					Body:     &comment,
 				})
 			} else {
-				log.Printf("File %s not found in PR diff or invalid line/comment. Skipping comment.", filePart)
+				log.Printf("File %s not found in PR diff. Skipping comment.", filePart)
 			}
 		}
 	}
