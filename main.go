@@ -367,10 +367,9 @@ func extractComments(responseText string, fileMap map[string]*github.CommitFile)
 	var reviewComments []*github.DraftReviewComment
 
 	// Identify the start of the "Specific Comments" section
-	// ### ##
-	specificCommentsIndex := strings.Index(responseText, "# Specific Comments")
+	specificCommentsIndex := strings.Index(responseText, "Specific Comments")
 	if specificCommentsIndex == -1 {
-		log.Println(`------- no 'Specific Comments' section found`)
+		log.Println("------- no 'Specific Comments' section found")
 		return reviewComments, nil
 	}
 
@@ -381,43 +380,29 @@ func extractComments(responseText string, fileMap map[string]*github.CommitFile)
 	lines := strings.Split(specificComments, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "File:") {
-			// Extract the file name and line number
-			parts := strings.SplitN(line, ",", 2)
-			if len(parts) == 2 {
-				filePart := strings.TrimSpace(strings.TrimPrefix(parts[0], "File: \""))
-				filePart = strings.TrimSuffix(filePart, "\"")
-				linePart := strings.TrimSpace(parts[1])
+		// Define regex to match different patterns
+		re := regexp.MustCompile(`(?i)-?\s*\**File:\s*[` + "`" + `"']?([^,` + "`" + `"']+)['"]?,\s*Line\s*(\d+)\**:?\s*(.*)`)
 
-				// Extract line number and comment
-				lineNumber, comment := parseLineComment(linePart)
-				if filePart != "" && lineNumber > 0 && comment != "" {
-					reviewComments = append(reviewComments, &github.DraftReviewComment{
-						Path:     &filePart,
-						Position: &lineNumber,
-						Body:     &comment,
-					})
-				}
+		if matches := re.FindStringSubmatch(line); matches != nil {
+			filePart := strings.TrimSpace(matches[1])
+			lineNumberStr := strings.TrimSpace(matches[2])
+			comment := strings.TrimSpace(matches[3])
+
+			lineNumber, err := strconv.Atoi(lineNumberStr)
+			if err != nil {
+				log.Printf("Invalid line number '%s' in line: %s", lineNumberStr, line)
+				continue
 			}
-		}
 
-		if strings.HasPrefix(line, "- File:") {
-			// Extract the file name and line number
-			parts := strings.SplitN(line, ",", 2)
-			if len(parts) == 2 {
-				filePart := strings.TrimSpace(strings.TrimPrefix(parts[0], "File: \""))
-				filePart = strings.TrimSuffix(filePart, "\"")
-				linePart := strings.TrimSpace(parts[1])
-
-				// Extract line number and comment
-				lineNumber, comment := parseLineComment(linePart)
-				if filePart != "" && lineNumber > 0 && comment != "" {
-					reviewComments = append(reviewComments, &github.DraftReviewComment{
-						Path:     &filePart,
-						Position: &lineNumber,
-						Body:     &comment,
-					})
-				}
+			// Validate file and line number
+			if _, exists := fileMap[filePart]; exists && lineNumber > 0 && comment != "" {
+				reviewComments = append(reviewComments, &github.DraftReviewComment{
+					Path:     &filePart,
+					Position: &lineNumber,
+					Body:     &comment,
+				})
+			} else {
+				log.Printf("File %s not found in PR diff or invalid line/comment. Skipping comment.", filePart)
 			}
 		}
 	}
