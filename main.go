@@ -49,7 +49,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Generate a review using GPT-4
+	// Generate a review using the assistant with a specific ID
 	review, err := generateReviewWithAssistant(pr)
 	if err != nil {
 		fmt.Printf("Error generating review: %v\n", err)
@@ -71,7 +71,7 @@ func main() {
 	}
 }
 
-// generateReviewWithAssistant sends PR details to the OpenAI assistant and gets a review summary
+// generateReviewWithAssistant sends PR details to the OpenAI assistant with a specific ID and gets a review summary
 func generateReviewWithAssistant(pr *github.PullRequest) (string, error) {
 	client := openai.NewClient(os.Getenv("OPENAI_API_KEY"))
 
@@ -92,15 +92,17 @@ Please provide a detailed code review that includes:
 Respond as a detailed and professional code review.
 `, *pr.Title, *pr.User.Login, *pr.Body)
 
-	// Send the prompt to the assistant
+	// Send the prompt to the assistant with the specific ID
 	resp, err := client.CreateChatCompletion(context.Background(), openai.ChatCompletionRequest{
-		Model: os.Getenv("ASSISTANT_MODEL"),
+		// Model: os.Getenv("ASSISTANT_MODEL"),
 		Messages: []openai.ChatCompletionMessage{
 			{
 				Role:    openai.ChatMessageRoleUser,
 				Content: prompt,
 			},
 		},
+		// Use the specific assistant ID
+		User: os.Getenv("ASSISTANT_ID"),
 	})
 	if err != nil {
 		return "", err
