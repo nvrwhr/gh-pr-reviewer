@@ -114,9 +114,9 @@ func main() {
 	}
 
 	// Output the generated review
-	log.Println("(`------- Generated Review:")
+	log.Println("------- Generated Review:")
 	log.Println(review)
-	log.Println(`------- File comments`)
+	log.Println(`------- File comments:`)
 
 	for _, comment := range reviewComments {
 		log.Printf("File: %s, Line: %d\nComment: %s\n", *comment.Path, *comment.Position, *comment.Body)
@@ -297,7 +297,7 @@ pretify those sections
 	
 	Where "comment a" would be your comment. 
 	I will be stripping those lines from payload to push the comments to gh, so keep them clean.
-	Please put them all those line comments into  section "Specific Comments"
+	Please put them all those line comments into  section "Specific Comments", do not change this name or add anything to it.
 
 Finally, make a recommendation on whether this PR should be approved or if changes are required. Respond with __approve__ or __request_changes__ at the end of your review.
 
@@ -335,7 +335,7 @@ Finally, make a recommendation on whether this PR should be approved or if chang
 	if err != nil {
 		return "", nil, "", err
 	}
-
+	log.Println(`------- Marked files for comments: `, len(reviewComments))
 	responseText = removeSpecificCommentsSection(responseText)
 
 	return responseText, reviewComments, action, nil
@@ -366,8 +366,8 @@ func extractComments(responseText string, fileMap map[string]*github.CommitFile)
 	// ### ##
 	specificCommentsIndex := strings.Index(responseText, "# Specific Comments")
 	if specificCommentsIndex == -1 {
-		fmt.Println(responseText)
-		return reviewComments, fmt.Errorf("no 'Specific Comments' section found")
+		log.Println(`------- no 'Specific Comments' section found`)
+		return reviewComments, nil
 	}
 
 	// Extract the "Specific Comments" section
