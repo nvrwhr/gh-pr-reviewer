@@ -73,6 +73,30 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Check for pending reviews
+	pendingReview, err := getPendingReview(client, ctx, *owner, *repo, *prNumber)
+	if err != nil {
+		fmt.Printf("Error checking for pending reviews: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Handle existing pending review
+	if pendingReview != nil {
+		fmt.Println("A pending review already exists.")
+		if *dryRun {
+			fmt.Println("Dry run: Review not posted to GitHub.")
+			return
+		}
+
+		// Optionally, submit or dismiss the pending review here
+		// For now, we'll dismiss it to proceed with the new review
+		err = dismissPendingReview(client, ctx, *owner, *repo, *prNumber, pendingReview.GetID(), "Dismissing pending review to submit a new one.")
+		if err != nil {
+			fmt.Printf("Error dismissing pending review: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
 	// Generate the review and parse the assistant's recommendation
 	review, reviewComments, action, err := generateReviewWithAssistant(pr, files)
 	if err != nil {
@@ -93,9 +117,6 @@ func main() {
 		return
 	}
 
-	// Invalidate previous review by removing the stored review (optional)
-	_ = invalidatePreviousReview(*prNumber)
-
 	// Determine the action based on the assistant's recommendation and PR checks
 	var state string
 	if action == "approve" && checksPassed {
@@ -114,6 +135,30 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Println("Review posted successfully!")
+}
+
+// getPendingReview checks if there's a pending review for the PR
+func getPendingReview(client *github.Client, ctx context.Context, owner, repo string, prNumber int) (*github.PullRequestReview, error) {
+	reviews, _, err := client.PullRequests.ListReviews(ctx, owner, repo, prNumber, &github.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	for _, review := range reviews {
+		if review.GetState() == "PENDING" {
+			return review, nil
+		}
+	}
+
+	return nil, nil
+}
+
+// dismissPendingReview dismisses an existing pending review
+func dismissPendingReview(client *github.Client, ctx context.Context, owner, repo string, prNumber int, reviewID int64, message string) error {
+	_, _, err := client.PullRequests.DismissReview(ctx, owner, repo, prNumber, reviewID, &github.PullRequestReviewDismissalRequest{
+		Message: github.String(message),
+	})
+	return err
 }
 
 // generateReviewWithAssistant sends all file changes in a single prompt and generates a detailed review
@@ -142,31 +187,25 @@ func generateReviewWithAssistant(pr *github.PullRequest, files []*github.CommitF
 
 	// Construct the full prompt with all file changes
 	var fileChanges []string
+	fileMap := make(map[string]bool)
 	for _, file := range files {
 		if file.Patch != nil {
 			fileChanges = append(fileChanges, fmt.Sprintf("File: %s\nPatch:\n%s", *file.Filename, *file.Patch))
+			fileMap[*file.Filename] = true
 		}
 	}
 
 	combinedChanges := strings.Join(fileChanges, "\n\n")
 	prompt := fmt.Sprintf(`
-You are a code review assistant. A developer has submitted a pull request (PR) with the following details:
-
-Title: %s
-Author: %s
-Description: %s
-
-The following files were changed:
-%s
-
-Please provide a detailed code review that includes:
-1. Summary of what the PR does.
-2. Suggestions for improvements or refactoring.
-3. Potential bugs or issues to look out for.
-4. Comments on specific lines of code where necessary.
-
-Finally, make a recommendation on whether this PR should be approved or if changes are required. Respond with "approve" or "request_changes" at the end of your review.
-`, title, author, body, combinedChanges)
+	A developer has submitted a pull request (PR) with the following details:
+	
+	Title: %s
+	Author: %s
+	Description: %s
+	
+	The following files were changed:
+	%s
+	`, title, author, body, combinedChanges)
 
 	resp, err := client.CreateChatCompletion(context.Background(), openai.ChatCompletionRequest{
 		Model: openai.GPT4oMini,
@@ -186,9 +225,9 @@ Finally, make a recommendation on whether this PR should be approved or if chang
 
 	// Parse the response to determine the action (approve or request changes)
 	var action string
-	if strings.Contains(strings.ToLower(responseText), "approve") {
+	if strings.Contains(strings.ToLower(responseText), "__approve__") {
 		action = "approve"
-	} else if strings.Contains(strings.ToLower(responseText), "request_changes") {
+	} else if strings.Contains(strings.ToLower(responseText), "__request_changes__") {
 		action = "request_changes"
 	} else {
 		action = "request_changes" // Default to requesting changes if unsure
@@ -196,15 +235,23 @@ Finally, make a recommendation on whether this PR should be approved or if chang
 
 	// Example: Parse the response for line comments and overall feedback
 	var reviewComments []*github.DraftReviewComment
-	// Here you would parse `responseText` to extract specific line comments and general feedback
-	// For simplicity, we'll just add a mock comment
-	if len(responseText) > 0 {
-		reviewComments = append(reviewComments, &github.DraftReviewComment{
-			Path:     github.String("example.go"),
-			Position: github.Int(12), // Example line number, this would be parsed from the response
-			Body:     github.String("This line could benefit from better error handling."),
-		})
-	}
+
+	// Mocked comment parsing logic; in reality, you would parse responseText
+	// mockComment := "This line could benefit from better error handling."
+
+	// for _, file := range files {
+	// 	if file.Patch != nil {
+	// 		// Ensure the file exists in the PR
+	// 		if fileMap[*file.Filename] {
+	// 			// Add a comment at a specific line, assuming line 12 for example
+	// 			reviewComments = append(reviewComments, &github.DraftReviewComment{
+	// 				Path:     file.Filename,
+	// 				Position: github.Int(12), // Example line number, should be valid
+	// 				Body:     github.String(mockComment),
+	// 			})
+	// 		}
+	// 	}
+	// }
 
 	return responseText, reviewComments, action, nil
 }
@@ -245,9 +292,10 @@ func postReviewWithComments(client *github.Client, ctx context.Context, owner, r
 	if err != nil {
 		if ghErr, ok := err.(*github.ErrorResponse); ok && ghErr.Response.StatusCode == 422 {
 			// Handle the "one pending review" scenario
-			fmt.Println("A pending review already exists. Please submit or dismiss the existing review before posting a new one.")
+			fmt.Println("A pending review already exists. Please submit or dismiss the existing review before posting a new one: " + err.Error())
 			return nil
 		}
+		fmt.Println("GH PR post Error: " + err.Error())
 		return err
 	}
 	return nil
