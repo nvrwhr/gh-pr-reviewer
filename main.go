@@ -295,7 +295,7 @@ pretify those sections
 	File: "./fileA", Line 2: "comment b"
 	File: "./fileB", Line 1: "comment c" 
 	
-	Where "comment a" would be your comment. 
+	Where "comment a" would be your comment.  Do not change  the " to something else in response, keep it double quotes.
 	I will be stripping those lines from payload to push the comments to gh, so keep them clean.
 	Please put them all those line comments into  section "Specific Comments", do not change this name or add anything to it.
 
@@ -342,9 +342,10 @@ Finally, make a recommendation on whether this PR should be approved or if chang
 }
 
 func removeSpecificCommentsSection(input string) string {
-	// Define the regex pattern to match the section between `#{1,3} Specific Comments`
-	// and the next `#{1,3} <some other section>`.
-	pattern := `(?s)(?m)#{1,3}\s+Specific Comments.*?#{1,3}\s+\w+`
+	// Define the regex pattern to match the section between `#{1,4} <number>.? Specific Comments`
+	// and the next `#{1,4} <some other section>`.
+	// This pattern will match headers like `#### Specific Comments`, `### 4. Specific Comments`, etc.
+	pattern := `(?s)(?m)#{1,4}\s+\d*\.?\s*Specific Comments.*?#{1,4}\s+\d*\.?\s*\w+`
 
 	// Compile the regex pattern
 	re := regexp.MustCompile(pattern)
@@ -352,7 +353,7 @@ func removeSpecificCommentsSection(input string) string {
 	// Replace the matched section with the new section header, keeping the end section.
 	cleaned := re.ReplaceAllStringFunc(input, func(m string) string {
 		// Find the start of the next section to keep it intact
-		nextSection := regexp.MustCompile(`#{1,3}\s+\w+`).FindString(m)
+		nextSection := regexp.MustCompile(`#{1,4}\s+\d*\.?\s*\w+`).FindString(m)
 		return nextSection
 	})
 
