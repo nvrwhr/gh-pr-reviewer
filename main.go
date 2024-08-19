@@ -290,13 +290,14 @@ func generateReviewWithAssistant(pr *github.PullRequest, files []*github.CommitF
 	For mutliple lines please use just the first line number. If there are multiple comments in one file, please generate the comment multiple time as necessary, like that:
 
 	### Specific Comments:
-	- File: "./fileA", Line 1: "comment a" 
-	- File: "./fileA", Line 2: "comment b"
-	- File: "./fileB", Line 1: "comment c" 
+	- File: "fileA", Line 1: "comment a" 
+	- File: "fileA", Line 2: "comment b"
+	- File: "fileB", Line 1: "comment c" 
 	...
 	
 	Do not change the header section name and structure. Addhere to file list structure, including the double quotes.
-	
+	So do not change the Specific Comment section name, do not change the comment quoting.
+
 
 	
 
@@ -343,10 +344,11 @@ Finally, make a recommendation on whether this PR should be approved or if chang
 }
 
 func removeSpecificCommentsSection(input string) string {
-	// Define the regex pattern to match the section between `#{1,4} <number>.? Specific Comments`
-	// and the next `#{1,4} <some other section>`.
-	// This pattern will match headers like `#### Specific Comments`, `### 4. Specific Comments`, etc.
-	pattern := `(?s)(?m)#{1,4}\s+\d*\.?\s*Specific Comments.*?#{1,4}\s+\d*\.?\s*\w+`
+	// Define the regex pattern to match the section between:
+	// 1. Headers with 1 to 4 `#` characters (e.g., `#### 4. Specific Comments`)
+	// 2. Numbered titles with or without bold (e.g., `4. **Specific Comments:**` or `4. Specific Comments:`)
+	// and the next `#{1,4} <some other section>` or `\d*\.?\s*\w+` (for numbered sections).
+	pattern := `(?s)(?m)(#{1,4}\s+\d*\.?\s*\**Specific Comments\**:?.*?#{1,4}\s+\d*\.?\s*\w+|\d+\.\s*\*\*Specific Comments\*\*:?|\d+\.\s*Specific Comments:.*?#{1,4}\s+\d*\.?\s*\w+)`
 
 	// Compile the regex pattern
 	re := regexp.MustCompile(pattern)
@@ -354,7 +356,7 @@ func removeSpecificCommentsSection(input string) string {
 	// Replace the matched section with the new section header, keeping the end section.
 	cleaned := re.ReplaceAllStringFunc(input, func(m string) string {
 		// Find the start of the next section to keep it intact
-		nextSection := regexp.MustCompile(`#{1,4}\s+\d*\.?\s*\w+`).FindString(m)
+		nextSection := regexp.MustCompile(`#{1,4}\s+\d*\.?\s*\w+|\d+\.\s*\w+`).FindString(m)
 		return nextSection
 	})
 
