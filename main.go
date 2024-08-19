@@ -276,11 +276,9 @@ func generateReviewWithAssistant(pr *github.PullRequest, files []*github.CommitF
 	%s
 
 	Please provide a detailed code review that includes:
-1. A summary of what the PR does.
-2. Suggestions for improvements or refactoring.
-3. Potential bugs or issues to look out for. In particular files.
-
-pretify those sections
+1. A summary of what the PR does (prettyfy this section).
+2. Suggestions for improvements or refactoring (prettyfy this section).
+3. Potential bugs or issues to look out for. In particular files (prettyfy this section).
 
 4. Specific comments on lines of code where you spot bugs, issues, or things that should be changed. Include the file name and line number in your comments.
 
@@ -291,13 +289,16 @@ pretify those sections
 	
 	For mutliple lines please use just the first line number. If there are multiple comments in one file, please generate the comment multiple time as necessary, like that:
 
-	File: "./fileA", Line 1: "comment a" 
-	File: "./fileA", Line 2: "comment b"
-	File: "./fileB", Line 1: "comment c" 
+	### Specific Comments:
+	- File: "./fileA", Line 1: "comment a" 
+	- File: "./fileA", Line 2: "comment b"
+	- File: "./fileB", Line 1: "comment c" 
+	...
 	
-	Where "comment a" would be your comment.  Do not change  the " to something else in response, keep it double quotes.
-	I will be stripping those lines from payload to push the comments to gh, so keep them clean.
-	Please put them all those line comments into  section "Specific Comments", do not change this name or add anything to it.
+	Do not change the header section name and structure. Addhere to file list structure, including the double quotes.
+	
+
+	
 
 Finally, make a recommendation on whether this PR should be approved or if changes are required. Respond with __approve__ or __request_changes__ at the end of your review.
 
