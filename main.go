@@ -151,12 +151,11 @@ func main() {
 		log.Println(review)
 		log.Println("------- File comments:")
 		for _, comment := range reviewComments {
-			log.Printf("File: %s, Line: %d\nComment: %s\n", *comment.Path, *comment.Position, *comment.Body)
+			log.Printf("File: %s, Line: %d\nComment: %s\n", *comment.Path, *comment.Line, *comment.Body)
 		}
 		log.Println("-------")
 
 	} else {
-		// otherwise use what we had last time
 		review = savedReview.Review
 		reviewComments = savedReview.ReviewComments
 		action = savedReview.Action
@@ -224,7 +223,7 @@ func logSavedReview(savedReview *SavedReview) {
 	log.Println(savedReview.Review)
 	log.Println("------- File comments:")
 	for _, comment := range savedReview.ReviewComments {
-		log.Printf("File: %s, Line: %d\nComment: %s\n", *comment.Path, *comment.Position, *comment.Body)
+		log.Printf("File: %s, Line: %d\nComment: %s\n", *comment.Path, *comment.Line, *comment.Body)
 	}
 	log.Println("-------")
 }
@@ -509,9 +508,9 @@ func extractComments(responseText string, fileMap map[string]*github.CommitFile)
 			// Validate file part against the file map
 			if _, exists := fileMap[filePart]; exists {
 				reviewComments = append(reviewComments, &github.DraftReviewComment{
-					Path:     &filePart,
-					Position: &lineNumber,
-					Body:     &comment,
+					Path: &filePart,
+					Line: &lineNumber,
+					Body: &comment,
 				})
 			} else {
 				log.Printf("File %s not found in PR diff. Skipping comment.", filePart)
