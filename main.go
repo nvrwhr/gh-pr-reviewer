@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"regexp"
@@ -63,20 +62,19 @@ func main() {
 
 	// Construct the file path for the review
 	reviewFilePath := fmt.Sprintf("reviews/%s-%s-review.json", *repo, *pr.Head.SHA)
+	var savedReview *SavedReview
 
 	// Check if a review file exists for the current head SHA
-	if !*forcedry && *dryRun {
-		if _, err := os.Stat(reviewFilePath); err == nil {
-			// File exists, load the review from the file
-			savedReview, err := loadReviewFromFile(reviewFilePath)
-			if err == nil {
-				log.Println("Using saved review from file.")
-				logSavedReview(savedReview)
+	if _, err := os.Stat(reviewFilePath); err == nil {
+		// File exists, load the review from the file
+		savedReview, err = loadReviewFromFile(reviewFilePath)
+		if err == nil {
+			log.Println("Using saved review from file.")
+			logSavedReview(savedReview)
 
-				if *dryRun {
-					log.Println("Dry run: Review not posted to GitHub.")
-					return
-				}
+			if *dryRun {
+				log.Println("Dry run: Review not posted to GitHub.")
+				return
 			}
 		}
 	}
@@ -135,29 +133,42 @@ func main() {
 		}
 	}
 
-	// Generate the review and parse the assistant's recommendation
-	review, reviewComments, action, err := generateReviewWithAssistant(pr, files)
-	if err != nil {
-		fmt.Printf("Error generating review: %v\n", err)
-		os.Exit(1)
+	var review string
+	var reviewComments []*github.DraftReviewComment
+	var action string
+
+	// if there is no review, or we are forcing a new one
+	if savedReview == nil || (forcedry != nil && *forcedry) {
+		// ask LLM for review
+		review, reviewComments, action, err = generateReviewWithAssistant(pr, files)
+		if err != nil {
+			fmt.Printf("Error generating review: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Output the generated review
+		log.Println("------- Generated Review:")
+		log.Println(review)
+		log.Println("------- File comments:")
+		for _, comment := range reviewComments {
+			log.Printf("File: %s, Line: %d\nComment: %s\n", *comment.Path, *comment.Line, *comment.Body)
+		}
+		log.Println("-------")
+
+	} else {
+		review = savedReview.Review
+		reviewComments = savedReview.ReviewComments
+		action = savedReview.Action
 	}
 
-	// Output the generated review
-	log.Println("------- Generated Review:")
-	log.Println(review)
-	log.Println("------- File comments:")
-	for _, comment := range reviewComments {
-		log.Printf("File: %s, Line: %d\nComment: %s\n", *comment.Path, *comment.Position, *comment.Body)
-	}
-	log.Println("-------")
-
-	if *dryRun {
-		// Save the review to a file during dry run
+	if *dryRun || *forcedry {
+		// Save the review to a file during dry run or after force
 		err = saveReviewToFile(reviewFilePath, review, reviewComments, action)
 		if err != nil {
 			log.Printf("Error saving review to file: %v\n", err)
 		}
 		log.Println("Dry run: Review not posted to GitHub.")
+		// either way the force or dry run END HERE <===================================
 		return
 	}
 
@@ -201,7 +212,7 @@ func main() {
 		// Post the review if not a dry run
 		err = postReviewWithComments(client, ctx, *owner, *repo, *prNumber, review, reviewComments, state)
 		if err != nil {
-			log.Fatal("Error posting review: %v\n", err)
+			log.Fatalf("Error posting review: %v\n", err)
 		}
 		fmt.Println("Review posted successfully!")
 	}
@@ -212,37 +223,60 @@ func logSavedReview(savedReview *SavedReview) {
 	log.Println(savedReview.Review)
 	log.Println("------- File comments:")
 	for _, comment := range savedReview.ReviewComments {
-		log.Printf("File: %s, Line: %d\nComment: %s\n", *comment.Path, *comment.Position, *comment.Body)
+		log.Printf("File: %s, Line: %d\nComment: %s\n", *comment.Path, *comment.Line, *comment.Body)
 	}
 	log.Println("-------")
 }
 
-func saveReviewToFile(filePath, review string, reviewComments []*github.DraftReviewComment, action string) error {
+func saveReviewToFile(reviewFilePath, review string, reviewComments []*github.DraftReviewComment, action string) error {
+	// Save review content to .md file
+	mdFilePath := strings.Replace(reviewFilePath, ".json", ".md", 1)
+	err := os.WriteFile(mdFilePath, []byte(review), 0644)
+	if err != nil {
+		return fmt.Errorf("error saving review to .md file: %w", err)
+	}
+
+	// Save comments and action to .json file
+	jsonFilePath := reviewFilePath
 	savedReview := SavedReview{
-		Review:         review,
+		Review:         "", // Review content is stored in .md file
 		ReviewComments: reviewComments,
 		Action:         action,
 	}
-
 	data, err := json.MarshalIndent(savedReview, "", "  ")
 	if err != nil {
-		return err
+		return fmt.Errorf("error marshaling review comments and action to JSON: %w", err)
+	}
+	err = os.WriteFile(jsonFilePath, data, 0644)
+	if err != nil {
+		return fmt.Errorf("error saving review comments and action to .json file: %w", err)
 	}
 
-	return ioutil.WriteFile(filePath, data, 0644)
+	return nil
 }
 
-func loadReviewFromFile(filePath string) (*SavedReview, error) {
-	data, err := ioutil.ReadFile(filePath)
+func loadReviewFromFile(reviewFilePath string) (*SavedReview, error) {
+	// Load review content from .md file
+	mdFilePath := strings.Replace(reviewFilePath, ".json", ".md", 1)
+	reviewContent, err := os.ReadFile(mdFilePath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error loading review content from .md file: %w", err)
+	}
+
+	// Load comments and action from .json file
+	data, err := os.ReadFile(reviewFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("error loading review comments and action from .json file: %w", err)
 	}
 
 	var savedReview SavedReview
 	err = json.Unmarshal(data, &savedReview)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error unmarshaling review comments and action from JSON: %w", err)
 	}
+
+	// Replace the empty review content with the loaded content from the .md file
+	savedReview.Review = string(reviewContent)
 
 	return &savedReview, nil
 }
@@ -304,7 +338,7 @@ func simplifyPatch(files []*github.CommitFile) string {
 // generateReviewWithAssistant sends all file changes in a single prompt and generates a detailed review
 func generateReviewWithAssistant(pr *github.PullRequest, files []*github.CommitFile) (string, []*github.DraftReviewComment, string, error) {
 	if pr == nil {
-		return "", nil, "", fmt.Errorf("No pull request to process")
+		return "", nil, "", fmt.Errorf("no pull request to process")
 	}
 
 	client := openai.NewClient(os.Getenv("OPENAI_API_KEY"))
@@ -474,9 +508,9 @@ func extractComments(responseText string, fileMap map[string]*github.CommitFile)
 			// Validate file part against the file map
 			if _, exists := fileMap[filePart]; exists {
 				reviewComments = append(reviewComments, &github.DraftReviewComment{
-					Path:     &filePart,
-					Position: &lineNumber,
-					Body:     &comment,
+					Path: &filePart,
+					Line: &lineNumber,
+					Body: &comment,
 				})
 			} else {
 				log.Printf("File %s not found in PR diff. Skipping comment.", filePart)
