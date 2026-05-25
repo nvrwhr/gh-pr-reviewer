@@ -62,7 +62,7 @@ Useful Pi/Docker flags:
 
 ## Dry/ForceDry Flags
 
-If `-dry` is set, the tool creates review files based on the current head commit hash. Review them, then run again without `-dry` to post the saved review.
+If `-dry` is set, the tool creates review files in `.reviews/` based on the current head commit hash. Review them, then run again without `-dry` to post the saved review.
 
 `-dry` reuses an existing review as long as the head commit does not change. Use `-forcedry` to generate a new review for the same head commit.
 

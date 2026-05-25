@@ -121,7 +121,7 @@ If adding Node/Pi SDK runner code, keep commands documented in `README.md` and p
 ## File Notes
 
 - `main.go`: current single-file Go CLI.
-- `reviews/`: dry-run review cache keyed by repo/head SHA.
+- `.reviews/`: dry-run review cache keyed by repo/head SHA.
 - `PLAN.md`: migration plan; update when architecture changes.
 - `.env.example`: should document GitHub token and Dockerized Pi credential expectations.
 

@@ -8,7 +8,7 @@ Turn the current PR-review generator into a PR-author assistant that creates hig
 - CodeGraph semantic context: impacted symbols, callers/callees, affected tests, nearby architecture.
 - Pi agent reasoning running inside the project Docker container via the Pi SDK or Pi RPC/print mode instead of a hard-coded OpenAI chat call.
 
-The first target should preserve current behavior: dry-run files under `reviews/`, GitHub posting, self-review fallback to `COMMENT`, and inline comments only on valid changed lines.
+The first target should preserve current behavior: dry-run files under `.reviews/`, GitHub posting, self-review fallback to `COMMENT`, and inline comments only on valid changed lines.
 
 ## Current State
 
@@ -240,8 +240,8 @@ Update `.env.example`:
    - invalid generated comment count,
    - Pi model/thinking level when available.
 4. Save expanded prompt/context next to review files for debugging:
-   - `reviews/<repo>-<sha>-prompt.md`,
-   - `reviews/<repo>-<sha>-context.md`.
+   - `.reviews/<repo>-<sha>-prompt.md`,
+   - `.reviews/<repo>-<sha>-context.md`.
 
 ## Acceptance Criteria
 

@@ -170,6 +170,11 @@ Input JSON:
 }
 
 func savePiPrompt(pr *github.PullRequest, prompt string) (string, error) {
+	reviewsDir := projectPath(".reviews")
+	if err := os.MkdirAll(reviewsDir, 0755); err != nil {
+		return "", fmt.Errorf("create .reviews dir: %w", err)
+	}
+
 	repo := "repo"
 	if pr.GetBase() != nil && pr.GetBase().GetRepo() != nil && pr.GetBase().GetRepo().GetName() != "" {
 		repo = pr.GetBase().GetRepo().GetName()
@@ -179,18 +184,12 @@ func savePiPrompt(pr *github.PullRequest, prompt string) (string, error) {
 		sha = fmt.Sprintf("pr-%d", pr.GetNumber())
 	}
 
-	pattern := fmt.Sprintf(".pi-prompt-%s-%s-*.md", sanitizePathPart(repo), sanitizePathPart(sha))
-	f, err := os.CreateTemp(".", pattern)
-	if err != nil {
-		return "", fmt.Errorf("create temp pi prompt: %w", err)
-	}
-	defer f.Close()
-
-	if _, err := f.WriteString(prompt); err != nil {
+	path := filepath.Join(reviewsDir, fmt.Sprintf("%s-%s-prompt.md", sanitizePathPart(repo), sanitizePathPart(sha)))
+	if err := os.WriteFile(path, []byte(prompt), 0644); err != nil {
 		return "", fmt.Errorf("write pi prompt: %w", err)
 	}
 
-	return filepath.ToSlash(filepath.Base(f.Name())), nil
+	return filepath.ToSlash(filepath.Join(".reviews", filepath.Base(path))), nil
 }
 
 func sanitizePathPart(s string) string {
@@ -266,12 +265,44 @@ func parseStructuredReview(output string) (*StructuredReview, error) {
 	if start >= 0 && end > start {
 		trimmed = trimmed[start : end+1]
 	}
-	var review StructuredReview
-	if err := json.Unmarshal([]byte(trimmed), &review); err != nil {
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(trimmed), &raw); err != nil {
 		return nil, err
 	}
+
+	var review StructuredReview
+	if v, ok := raw["body_markdown"]; ok {
+		if err := json.Unmarshal(v, &review.BodyMarkdown); err != nil {
+			return nil, fmt.Errorf("invalid body_markdown: %w", err)
+		}
+	} else {
+		for _, alias := range []string{"body_markmarkdown", "bodyMarkdown", "body"} {
+			if v, ok := raw[alias]; ok {
+				if err := json.Unmarshal(v, &review.BodyMarkdown); err != nil {
+					return nil, fmt.Errorf("invalid %s: %w", alias, err)
+				}
+				break
+			}
+		}
+	}
+	if v, ok := raw["inline_comments"]; ok {
+		if err := json.Unmarshal(v, &review.InlineComments); err != nil {
+			return nil, fmt.Errorf("invalid inline_comments: %w", err)
+		}
+	}
+	if v, ok := raw["recommendation"]; ok {
+		if err := json.Unmarshal(v, &review.Recommendation); err != nil {
+			return nil, fmt.Errorf("invalid recommendation: %w", err)
+		}
+	}
+	if v, ok := raw["confidence"]; ok {
+		if err := json.Unmarshal(v, &review.Confidence); err != nil {
+			return nil, fmt.Errorf("invalid confidence: %w", err)
+		}
+	}
 	if strings.TrimSpace(review.BodyMarkdown) == "" {
-		return nil, fmt.Errorf("body_markdown is empty")
+		return nil, fmt.Errorf("body_markdown is empty or missing")
 	}
 	return &review, nil
 }

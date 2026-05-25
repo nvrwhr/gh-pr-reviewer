@@ -70,7 +70,7 @@ func main() {
 	}
 
 	// Construct the file path for the review relative to the project working directory.
-	reviewFilePath := projectPath("reviews", fmt.Sprintf("%s-%s-review.json", *repo, *pr.Head.SHA))
+	reviewFilePath := projectPath(".reviews", fmt.Sprintf("%s-%s-review.json", *repo, *pr.Head.SHA))
 	var savedReview *SavedReview
 
 	// Check if a review file exists for the current head SHA
@@ -179,14 +179,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		// Output the generated review
-		log.Println("------- Generated Review:")
-		log.Println(review)
-		log.Println("------- File comments:")
-		for _, comment := range reviewComments {
-			log.Printf("File: %s, Line: %d\nComment: %s\n", *comment.Path, *comment.Line, *comment.Body)
-		}
-		log.Println("-------")
+		printReviewPreview(review, reviewComments, action)
 
 	} else {
 		review = savedReview.Review
@@ -201,7 +194,12 @@ func main() {
 		if err != nil {
 			log.Printf("Error saving review to file: %v\n", err)
 		}
-		log.Println("Dry run: Review not posted to GitHub.")
+		mdFilePath := strings.Replace(reviewFilePath, ".json", ".md", 1)
+		log.Println("")
+		log.Println("Dry run only. Nothing was posted to GitHub.")
+		log.Printf("Review summary:  %s", mdFilePath)
+		log.Printf("Review metadata: %s", reviewFilePath)
+		log.Println("")
 		// either way the force or dry run END HERE <===================================
 		return
 	}
@@ -300,13 +298,30 @@ func logDiffContextSummary(diffCtx *PullRequestDiffContext) {
 }
 
 func logSavedReview(savedReview *SavedReview) {
-	log.Println("------- Loaded Review:")
-	log.Println(savedReview.Review)
-	log.Println("------- File comments:")
-	for _, comment := range savedReview.ReviewComments {
-		log.Printf("File: %s, Line: %d\nComment: %s\n", *comment.Path, *comment.Line, *comment.Body)
+	printReviewPreview(savedReview.Review, savedReview.ReviewComments, savedReview.Action)
+}
+
+func printReviewPreview(review string, reviewComments []*github.DraftReviewComment, action string) {
+	log.Println("")
+	log.Println("================ REVIEW PREVIEW ================")
+	if action != "" {
+		log.Printf("Recommendation: %s", strings.ToUpper(action))
 	}
-	log.Println("-------")
+	log.Println("")
+	log.Println("--- Summary ---")
+	log.Println(strings.TrimSpace(review))
+	log.Println("")
+	log.Printf("--- Inline Comments (%d) ---", len(reviewComments))
+	if len(reviewComments) == 0 {
+		log.Println("(none)")
+	} else {
+		for i, comment := range reviewComments {
+			log.Printf("%d. %s:%d", i+1, *comment.Path, *comment.Line)
+			log.Printf("   %s", strings.TrimSpace(*comment.Body))
+		}
+	}
+	log.Println("================================================")
+	log.Println("")
 }
 
 func saveReviewToFile(reviewFilePath, review string, reviewComments []*github.DraftReviewComment, action string) error {
