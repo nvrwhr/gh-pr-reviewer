@@ -3,4 +3,4 @@
 reviews/*.json
 reviews/*.md
 *.exe
-*.codegraph
+.codegraph

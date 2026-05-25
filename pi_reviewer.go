@@ -8,6 +8,8 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -64,8 +66,12 @@ func generateReviewWithPi(pr *github.PullRequest, files []*github.CommitFile, di
 		return "", nil, "", err
 	}
 
-	log.Printf("Pi reviewer: prompt built (%d chars); invoking pi in container", len(prompt))
-	output, err := runPiPromptInContainer(cfg, prompt)
+	promptFile, err := savePiPrompt(pr, prompt)
+	if err != nil {
+		return "", nil, "", err
+	}
+	log.Printf("Pi reviewer: prompt built (%d chars), saved to %s; invoking pi in container", len(prompt), promptFile)
+	output, err := runPiPromptInContainer(cfg, promptFile)
 	if err != nil {
 		return "", nil, "", err
 	}
@@ -155,7 +161,36 @@ Input JSON:
 ` + string(data), nil
 }
 
-func runPiPromptInContainer(cfg PiConfig, prompt string) (string, error) {
+func savePiPrompt(pr *github.PullRequest, prompt string) (string, error) {
+	if err := os.MkdirAll("reviews", 0755); err != nil {
+		return "", fmt.Errorf("create reviews dir: %w", err)
+	}
+	repo := "repo"
+	if pr.GetBase() != nil && pr.GetBase().GetRepo() != nil && pr.GetBase().GetRepo().GetName() != "" {
+		repo = pr.GetBase().GetRepo().GetName()
+	}
+	sha := pr.GetHead().GetSHA()
+	if sha == "" {
+		sha = fmt.Sprintf("pr-%d", pr.GetNumber())
+	}
+	path := filepath.Join("reviews", fmt.Sprintf("%s-%s-prompt.md", sanitizePathPart(repo), sanitizePathPart(sha)))
+	if err := os.WriteFile(path, []byte(prompt), 0644); err != nil {
+		return "", fmt.Errorf("write pi prompt: %w", err)
+	}
+	return filepath.ToSlash(path), nil
+}
+
+func sanitizePathPart(s string) string {
+	re := regexp.MustCompile(`[^A-Za-z0-9._-]+`)
+	out := re.ReplaceAllString(s, "-")
+	out = strings.Trim(out, "-.")
+	if out == "" {
+		return "unknown"
+	}
+	return out
+}
+
+func runPiPromptInContainer(cfg PiConfig, promptFile string) (string, error) {
 	args := []string{
 		"exec", "-i",
 		"-w", cfg.ContainerRepoPath,
@@ -166,14 +201,13 @@ func runPiPromptInContainer(cfg PiConfig, prompt string) (string, error) {
 	if cfg.Model != "" {
 		args = append(args, "--model", cfg.Model)
 	}
-	args = append(args, "Return the requested strict JSON for the PR review. Read the prompt from stdin.")
+	args = append(args, "@"+promptFile, "Return ONLY the strict JSON requested by the prompt file.")
 
 	log.Printf("Pi reviewer: docker %s", shellQuoteArgs(args))
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Env = append(os.Environ(), "MSYS_NO_PATHCONV=1", `MSYS2_ARG_CONV_EXCL=*`)
-	cmd.Stdin = strings.NewReader(prompt)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

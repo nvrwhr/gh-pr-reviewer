@@ -39,7 +39,7 @@ func FetchRelatedIssues(client *github.Client, ctx context.Context, owner, repo 
 			log.Printf("Related issues: failed to fetch #%d (continuing): %v", number, err)
 			continue
 		}
-		if issue.IsPullRequest() {
+		if issue.GetPullRequestLinks() != nil {
 			log.Printf("Related issues: #%d is a PR, skipping as issue context", number)
 			continue
 		}
