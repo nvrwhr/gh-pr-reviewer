@@ -22,6 +22,7 @@ type PiConfig struct {
 	Thinking          string
 	Model             string
 	UseCodeGraph      bool
+	KeepPromptFile    bool
 }
 
 type StructuredReview struct {
@@ -69,6 +70,13 @@ func generateReviewWithPi(pr *github.PullRequest, files []*github.CommitFile, di
 	promptFile, err := savePiPrompt(pr, prompt)
 	if err != nil {
 		return "", nil, "", err
+	}
+	if !cfg.KeepPromptFile {
+		defer func() {
+			if err := os.Remove(promptFile); err != nil && !os.IsNotExist(err) {
+				log.Printf("Pi reviewer: failed to remove temp prompt file %s: %v", promptFile, err)
+			}
+		}()
 	}
 	log.Printf("Pi reviewer: prompt built (%d chars), saved to %s; invoking pi in container", len(prompt), promptFile)
 	output, err := runPiPromptInContainer(cfg, promptFile)
@@ -162,9 +170,6 @@ Input JSON:
 }
 
 func savePiPrompt(pr *github.PullRequest, prompt string) (string, error) {
-	if err := os.MkdirAll("reviews", 0755); err != nil {
-		return "", fmt.Errorf("create reviews dir: %w", err)
-	}
 	repo := "repo"
 	if pr.GetBase() != nil && pr.GetBase().GetRepo() != nil && pr.GetBase().GetRepo().GetName() != "" {
 		repo = pr.GetBase().GetRepo().GetName()
@@ -173,11 +178,19 @@ func savePiPrompt(pr *github.PullRequest, prompt string) (string, error) {
 	if sha == "" {
 		sha = fmt.Sprintf("pr-%d", pr.GetNumber())
 	}
-	path := filepath.Join("reviews", fmt.Sprintf("%s-%s-prompt.md", sanitizePathPart(repo), sanitizePathPart(sha)))
-	if err := os.WriteFile(path, []byte(prompt), 0644); err != nil {
+
+	pattern := fmt.Sprintf(".pi-prompt-%s-%s-*.md", sanitizePathPart(repo), sanitizePathPart(sha))
+	f, err := os.CreateTemp(".", pattern)
+	if err != nil {
+		return "", fmt.Errorf("create temp pi prompt: %w", err)
+	}
+	defer f.Close()
+
+	if _, err := f.WriteString(prompt); err != nil {
 		return "", fmt.Errorf("write pi prompt: %w", err)
 	}
-	return filepath.ToSlash(path), nil
+
+	return filepath.ToSlash(filepath.Base(f.Name())), nil
 }
 
 func sanitizePathPart(s string) string {

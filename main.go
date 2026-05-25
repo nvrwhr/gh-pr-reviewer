@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -24,10 +25,11 @@ type SavedReview struct {
 }
 
 func main() {
-	// Load environment variables from .env file
-	err := godotenv.Load()
+	// Load environment variables from .env file next to the executable.
+	envPath := appPath(".env")
+	err := godotenv.Load(envPath)
 	if err != nil {
-		fmt.Println("Error loading .env file")
+		fmt.Printf("Error loading .env file: %s\n", envPath)
 		os.Exit(1)
 	}
 
@@ -67,8 +69,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Construct the file path for the review
-	reviewFilePath := fmt.Sprintf("reviews/%s-%s-review.json", *repo, *pr.Head.SHA)
+	// Construct the file path for the review relative to the project working directory.
+	reviewFilePath := projectPath("reviews", fmt.Sprintf("%s-%s-review.json", *repo, *pr.Head.SHA))
 	var savedReview *SavedReview
 
 	// Check if a review file exists for the current head SHA
@@ -166,6 +168,7 @@ func main() {
 				Thinking:           *piThinking,
 				Model:              *piModel,
 				UseCodeGraph:       *useCodeGraph,
+				KeepPromptFile:     *dryRun || *forcedry,
 			})
 		} else {
 			review, reviewComments, action, err = generateReviewWithAssistant(pr, files)
@@ -251,6 +254,37 @@ func main() {
 	}
 }
 
+func appBaseDir() string {
+	exePath, err := os.Executable()
+	if err != nil {
+		log.Fatalf("resolve executable path: %v", err)
+	}
+
+	exePath, err = filepath.EvalSymlinks(exePath)
+	if err == nil {
+		return filepath.Dir(exePath)
+	}
+	return filepath.Dir(exePath)
+}
+
+func appPath(parts ...string) string {
+	all := append([]string{appBaseDir()}, parts...)
+	return filepath.Join(all...)
+}
+
+func projectBaseDir() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		log.Fatalf("resolve working directory: %v", err)
+	}
+	return wd
+}
+
+func projectPath(parts ...string) string {
+	all := append([]string{projectBaseDir()}, parts...)
+	return filepath.Join(all...)
+}
+
 func logDiffContextSummary(diffCtx *PullRequestDiffContext) {
 	if diffCtx == nil {
 		log.Println("Diff context: unavailable")
@@ -276,6 +310,10 @@ func logSavedReview(savedReview *SavedReview) {
 }
 
 func saveReviewToFile(reviewFilePath, review string, reviewComments []*github.DraftReviewComment, action string) error {
+	if err := os.MkdirAll(filepath.Dir(reviewFilePath), 0755); err != nil {
+		return fmt.Errorf("error creating review directory: %w", err)
+	}
+
 	// Save review content to .md file
 	mdFilePath := strings.Replace(reviewFilePath, ".json", ".md", 1)
 	err := os.WriteFile(mdFilePath, []byte(review), 0644)
