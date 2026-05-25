@@ -37,6 +37,13 @@ func main() {
 	prNumber := flag.Int("pr", 0, "Pull Request number (e.g., 42)")
 	dryRun := flag.Bool("dry", false, "Generate review without posting to GitHub")
 	forcedry := flag.Bool("forcedry", false, "Force overwrite the last local dry run review")
+	provider := flag.String("provider", "pi", "Review provider: pi or openai")
+	repoPath := flag.String("repo-path", ".", "Local repository path mounted into the Pi container")
+	piImage := flag.String("pi-image", "pi-sandbox:latest", "Docker image containing pi and codegraph")
+	containerRepoPath := flag.String("container-repo-path", "/root/workspace", "Repository path inside the Pi container")
+	piModel := flag.String("model", "", "Pi model pattern/id")
+	piThinking := flag.String("thinking", "high", "Pi thinking level")
+	useCodeGraph := flag.Bool("codegraph", true, "Use CodeGraph affected-scope context when provider=pi")
 	flag.Parse()
 
 	// Check required arguments
@@ -133,14 +140,28 @@ func main() {
 		}
 	}
 
+	diffCtx := BuildDiffContext(files)
+
 	var review string
 	var reviewComments []*github.DraftReviewComment
 	var action string
 
 	// if there is no review, or we are forcing a new one
 	if savedReview == nil || (forcedry != nil && *forcedry) {
-		// ask LLM for review
-		review, reviewComments, action, err = generateReviewWithAssistant(pr, files)
+		// ask provider for review
+		if strings.EqualFold(*provider, "pi") {
+			review, reviewComments, action, err = generateReviewWithPi(pr, files, diffCtx, PiConfig{
+				RepoPath:           *repoPath,
+				ContainerRepoPath:  *containerRepoPath,
+				Image:              *piImage,
+				Thinking:           *piThinking,
+				Model:              *piModel,
+				UseCodeGraph:       *useCodeGraph,
+			})
+		} else {
+			review, reviewComments, action, err = generateReviewWithAssistant(pr, files)
+			reviewComments, _ = ValidateReviewComments(reviewComments, diffCtx)
+		}
 		if err != nil {
 			fmt.Printf("Error generating review: %v\n", err)
 			os.Exit(1)
@@ -200,7 +221,9 @@ func main() {
 	} else {
 		// Determine the action based on the assistant's recommendation and PR checks
 		var state string
-		if action == "approve" && checksPassed {
+		if action == "comment" {
+			state = "COMMENT"
+		} else if action == "approve" && checksPassed {
 			state = "APPROVE"
 		} else if action == "request_changes" || !checksPassed {
 			state = "REQUEST_CHANGES"
