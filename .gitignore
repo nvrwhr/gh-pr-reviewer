@@ -2,3 +2,5 @@
 .env
 reviews/*.json
 reviews/*.md
+*.exe
+.codegraph

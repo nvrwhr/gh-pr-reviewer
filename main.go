@@ -37,6 +37,12 @@ func main() {
 	prNumber := flag.Int("pr", 0, "Pull Request number (e.g., 42)")
 	dryRun := flag.Bool("dry", false, "Generate review without posting to GitHub")
 	forcedry := flag.Bool("forcedry", false, "Force overwrite the last local dry run review")
+	provider := flag.String("provider", "pi", "Review provider: pi or openai")
+	piContainer := flag.String("pi-container", "pi-sandbox", "Name of the already-running Pi container to docker exec into")
+	containerRepoPath := flag.String("container-repo-path", "/root/workspace", "Repository path inside the Pi container")
+	piModel := flag.String("model", "", "Pi model pattern/id")
+	piThinking := flag.String("thinking", "high", "Pi thinking level")
+	useCodeGraph := flag.Bool("codegraph", true, "Use CodeGraph affected-scope context when provider=pi")
 	flag.Parse()
 
 	// Check required arguments
@@ -53,6 +59,7 @@ func main() {
 	tc := oauth2.NewClient(ctx, ts)
 	client := github.NewClient(tc)
 
+	log.Printf("Fetching PR %s/%s#%d", *owner, *repo, *prNumber)
 	// Fetch PR details
 	pr, _, err := client.PullRequests.Get(ctx, *owner, *repo, *prNumber)
 	if err != nil {
@@ -79,12 +86,16 @@ func main() {
 		}
 	}
 
+	log.Printf("Fetched PR: title=%q author=%q head=%q", pr.GetTitle(), pr.GetUser().GetLogin(), pr.GetHead().GetSHA())
+
 	// Fetch the current user (the reviewer)
 	user, _, err := client.Users.Get(ctx, "")
 	if err != nil {
 		fmt.Printf("Error fetching user details: %v\n", err)
 		os.Exit(1)
 	}
+
+	log.Printf("Authenticated as GitHub user %q", user.GetLogin())
 
 	// Fetch PR checks (e.g., CI tests)
 	checks, _, err := client.Checks.ListCheckRunsForRef(ctx, *owner, *repo, *pr.Head.SHA, &github.ListCheckRunsOptions{})
@@ -101,6 +112,10 @@ func main() {
 			break
 		}
 	}
+
+	log.Printf("Fetched %d check runs; checksPassed=%v", len(checks.CheckRuns), checksPassed)
+
+	relatedIssues := FetchRelatedIssues(client, ctx, *owner, *repo, pr, 5)
 
 	// Fetch PR files
 	files, _, err := client.PullRequests.ListFiles(ctx, *owner, *repo, *prNumber, &github.ListOptions{})
@@ -133,14 +148,29 @@ func main() {
 		}
 	}
 
+	log.Printf("Fetched %d PR files", len(files))
+	diffCtx := BuildDiffContext(files)
+	logDiffContextSummary(diffCtx)
+
 	var review string
 	var reviewComments []*github.DraftReviewComment
 	var action string
 
 	// if there is no review, or we are forcing a new one
 	if savedReview == nil || (forcedry != nil && *forcedry) {
-		// ask LLM for review
-		review, reviewComments, action, err = generateReviewWithAssistant(pr, files)
+		// ask provider for review
+		if strings.EqualFold(*provider, "pi") {
+			review, reviewComments, action, err = generateReviewWithPi(pr, files, diffCtx, relatedIssues, PiConfig{
+				ContainerRepoPath:  *containerRepoPath,
+				ContainerName:      *piContainer,
+				Thinking:           *piThinking,
+				Model:              *piModel,
+				UseCodeGraph:       *useCodeGraph,
+			})
+		} else {
+			review, reviewComments, action, err = generateReviewWithAssistant(pr, files)
+			reviewComments, _ = ValidateReviewComments(reviewComments, diffCtx)
+		}
 		if err != nil {
 			fmt.Printf("Error generating review: %v\n", err)
 			os.Exit(1)
@@ -163,6 +193,7 @@ func main() {
 
 	if *dryRun || *forcedry {
 		// Save the review to a file during dry run or after force
+		log.Printf("Saving dry-run review to %s", reviewFilePath)
 		err = saveReviewToFile(reviewFilePath, review, reviewComments, action)
 		if err != nil {
 			log.Printf("Error saving review to file: %v\n", err)
@@ -200,7 +231,9 @@ func main() {
 	} else {
 		// Determine the action based on the assistant's recommendation and PR checks
 		var state string
-		if action == "approve" && checksPassed {
+		if action == "comment" {
+			state = "COMMENT"
+		} else if action == "approve" && checksPassed {
 			state = "APPROVE"
 		} else if action == "request_changes" || !checksPassed {
 			state = "REQUEST_CHANGES"
@@ -216,6 +249,20 @@ func main() {
 		}
 		fmt.Println("Review posted successfully!")
 	}
+}
+
+func logDiffContextSummary(diffCtx *PullRequestDiffContext) {
+	if diffCtx == nil {
+		log.Println("Diff context: unavailable")
+		return
+	}
+	files := 0
+	validLines := 0
+	for _, fd := range diffCtx.Files {
+		files++
+		validLines += len(fd.ChangedLines)
+	}
+	log.Printf("Diff context: files=%d valid_inline_lines=%d", files, validLines)
 }
 
 func logSavedReview(savedReview *SavedReview) {
