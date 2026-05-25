@@ -42,7 +42,7 @@ Docker container (`pi-sandbox:latest`)
       └─ review prompt specialized for PR-author output
 ```
 
-Prefer a small adapter boundary so the Go CLI invokes the same `pi-sandbox:latest` container used for real project work. Bake Pi, CodeGraph, and review helper tools into that image, then run either `pi -p`, Pi RPC, or a small container-local runner inside `/root/workspace`.
+Prefer a small adapter boundary so the Go CLI connects to the already-running `pi-sandbox` container used for real project work via `docker exec`. Bake Pi, CodeGraph, and review helper tools into that image, then run either `pi -p`, Pi RPC, or a small container-local runner inside `/root/workspace`.
 
 ## Phase 1 — Fix Diff and Review-Line Grounding
 
@@ -97,7 +97,7 @@ This must happen before Pi/CodeGraph improvements; otherwise better model contex
 
 ## Phase 3 — Add CodeGraph Affected-Scope Context
 
-1. Add a `-repo-path` flag for the local checkout path. Default: current working directory. Mount this path into the Pi Docker container at the same stable path used by the existing launcher: `/root/workspace`.
+1. Do not mount anything from the reviewer process. Assume the Pi container was already started on top of the project and the project is already mounted at `/root/workspace`.
 2. Add a `-codegraph` flag, default enabled when `codegraph` exists on PATH.
 3. Before review generation:
    - run `codegraph status`,
@@ -126,19 +126,17 @@ Implement one of these adapters:
 
 ### Option A: Dockerized Pi CLI/RPC adapter from Go, fastest path
 
-- Add `PiReviewer` that shells out to a configured Docker command, for example:
+- Add `PiReviewer` that shells out to the already-running container, for example:
 
   ```bash
-  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" \
-  docker run --rm \
-    -v "$ABS_PROJECT:/root/workspace:rw" \
-    -e PI_PROJECT_DIR=/root/workspace \
+  docker exec -i \
     -w /root/workspace \
-    pi-sandbox:latest \
-    pi -p --no-session --tools read,grep,find,ls --thinking high "<review prompt>"
+    -e PI_PROJECT_DIR=/root/workspace \
+    pi-sandbox \
+    pi -p --no-session --tools read,grep,find,ls,bash --thinking high "<review prompt>"
   ```
 
-  or uses the same container with `pi --mode rpc --no-session` for structured event handling.
+  or uses the same running container with `pi --mode rpc --no-session` for structured event handling.
 
 - Match the existing manual launcher:
 
@@ -154,7 +152,7 @@ Implement one of these adapters:
   - Pi installed and authenticated/configured for the container runtime,
   - CodeGraph CLI baked into `pi-sandbox:latest`,
   - optional PR-review helper/runner baked into the image,
-  - repo checkout mounted at `/root/workspace`,
+  - repo checkout already mounted at `/root/workspace` before the reviewer runs,
   - `.codegraph/` index available through repo mount or a named volume,
   - model provider credentials supplied through env or baked/mounted Pi auth.
 - Benefits: minimal rewrite, keeps Go GitHub code, isolates Pi execution, matches actual runtime.
@@ -169,7 +167,7 @@ Implement one of these adapters:
 - Benefits: direct SDK events, model selection, custom tools, cleaner long-term Pi integration, stable runtime dependencies.
 - Risks: mixed Go/Node project, image build/publish flow, path translation, packaging complexity.
 
-Recommended path: start with Option A using the existing `pi-sandbox:latest` invocation shape. Avoid depending on host-installed Pi/CodeGraph. Design the adapter interface so Option B can replace it later.
+Recommended path: start with Option A using `docker exec` against the existing `pi-sandbox` container. Avoid depending on host-installed Pi/CodeGraph and avoid starting a fresh container per review. Design the adapter interface so Option B can replace it later.
 
 ## Phase 5 — Review Prompt Improvements
 
@@ -185,6 +183,7 @@ Create a dedicated prompt template that instructs Pi to act as the PR author, no
 Inputs to include:
 
 - PR title, body, author, branch, base/head SHA.
+- Related issue descriptions when the PR body/title references issues (`Fixes #123`, `Refs #123`, issue URLs, etc.).
 - CI/check summary.
 - Raw patch + parsed valid-line map, not the old simplified line counter.
 - CodeGraph affected scope: impacted symbols/files/tests plus callers/callees.
@@ -198,9 +197,8 @@ Add flags/env:
 - `-pi-runtime=docker|local`, default `docker`.
 - `-model=<pi model pattern>` passed to Pi when using CLI/RPC.
 - `-thinking=off|minimal|low|medium|high|xhigh`.
-- `-repo-path=<path>`.
-- `-container-repo-path=/root/workspace` for translating host paths to container paths.
-- `-pi-image=pi-sandbox:latest`.
+- `-container-repo-path=/root/workspace` for the already-mounted project path inside the container.
+- `-pi-container=pi-sandbox` for the already-running container name.
 - `-pi-docker-tty=true|false`; false for automation, true for manual interactive debugging.
 - `-pi-agent-dir=<path>` only if we decide not to keep Pi auth/config inside the sandbox image or mounted project.
 - `-codegraph=true|false`.

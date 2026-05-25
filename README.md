@@ -2,7 +2,7 @@
 
 This tool generates GitHub Pull Request review/author feedback. It can create a general review body and inline comments on changed PR lines.
 
-The default review provider is now Pi running inside `pi-sandbox:latest`. CodeGraph is used, when available in the container, to add affected-scope context such as dependent files/tests and relevant code context.
+The default review provider is now Pi/CodeGraph inside an already-running `pi-sandbox` container. The Go CLI connects to that container with `docker exec`; it does not start a new container per review. The prompt includes the PR title/body and related GitHub issue descriptions when the PR references issues such as `Fixes #123`.
 
 If you are the author of the PR, the tool only posts the review as a comment.
 
@@ -10,19 +10,21 @@ If you are the author of the PR, the tool only posts the review as a comment.
 
 Create a `.env` file based on `.env.example` with at least `GITHUB_TOKEN`.
 
-Build the sandbox image if needed:
+Start the sandbox container independently and give it a stable name:
 
 ```bash
-docker build -f Dockerfile.pi-sandbox -t pi-sandbox:latest .
+export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*"
+ABS_PROJECT="$(pwd)"
+
+docker run -it --rm \
+  --name pi-sandbox \
+  -v "${ABS_PROJECT}:/root/workspace:rw" \
+  -e PI_PROJECT_DIR=/root/workspace \
+  -w /root/workspace \
+  pi-sandbox:latest
 ```
 
-Run/login to Pi inside the same sandbox shape used by the tool:
-
-```bash
-./scripts/run-pi-sandbox.sh .
-```
-
-Inside the container, authenticate/configure Pi as needed and initialize CodeGraph for the repo:
+Inside that running container, authenticate/configure Pi as needed and initialize CodeGraph for the repo:
 
 ```bash
 pi /login
@@ -51,9 +53,8 @@ Useful Pi/Docker flags:
 
 ```bash
 -provider=pi|openai              # default pi
--repo-path=.                     # host repo path to mount
--pi-image=pi-sandbox:latest      # image with pi + codegraph
--container-repo-path=/root/workspace
+-pi-container=pi-sandbox         # running container name for docker exec
+-container-repo-path=/root/workspace # mounted project path inside that container
 -model=<pi-model-pattern>
 -thinking=off|minimal|low|medium|high|xhigh
 -codegraph=true|false

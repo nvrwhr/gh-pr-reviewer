@@ -38,8 +38,7 @@ func main() {
 	dryRun := flag.Bool("dry", false, "Generate review without posting to GitHub")
 	forcedry := flag.Bool("forcedry", false, "Force overwrite the last local dry run review")
 	provider := flag.String("provider", "pi", "Review provider: pi or openai")
-	repoPath := flag.String("repo-path", ".", "Local repository path mounted into the Pi container")
-	piImage := flag.String("pi-image", "pi-sandbox:latest", "Docker image containing pi and codegraph")
+	piContainer := flag.String("pi-container", "pi-sandbox", "Name of the already-running Pi container to docker exec into")
 	containerRepoPath := flag.String("container-repo-path", "/root/workspace", "Repository path inside the Pi container")
 	piModel := flag.String("model", "", "Pi model pattern/id")
 	piThinking := flag.String("thinking", "high", "Pi thinking level")
@@ -60,6 +59,7 @@ func main() {
 	tc := oauth2.NewClient(ctx, ts)
 	client := github.NewClient(tc)
 
+	log.Printf("Fetching PR %s/%s#%d", *owner, *repo, *prNumber)
 	// Fetch PR details
 	pr, _, err := client.PullRequests.Get(ctx, *owner, *repo, *prNumber)
 	if err != nil {
@@ -86,12 +86,16 @@ func main() {
 		}
 	}
 
+	log.Printf("Fetched PR: title=%q author=%q head=%q", pr.GetTitle(), pr.GetUser().GetLogin(), pr.GetHead().GetSHA())
+
 	// Fetch the current user (the reviewer)
 	user, _, err := client.Users.Get(ctx, "")
 	if err != nil {
 		fmt.Printf("Error fetching user details: %v\n", err)
 		os.Exit(1)
 	}
+
+	log.Printf("Authenticated as GitHub user %q", user.GetLogin())
 
 	// Fetch PR checks (e.g., CI tests)
 	checks, _, err := client.Checks.ListCheckRunsForRef(ctx, *owner, *repo, *pr.Head.SHA, &github.ListCheckRunsOptions{})
@@ -108,6 +112,10 @@ func main() {
 			break
 		}
 	}
+
+	log.Printf("Fetched %d check runs; checksPassed=%v", len(checks.CheckRuns), checksPassed)
+
+	relatedIssues := FetchRelatedIssues(client, ctx, *owner, *repo, pr, 5)
 
 	// Fetch PR files
 	files, _, err := client.PullRequests.ListFiles(ctx, *owner, *repo, *prNumber, &github.ListOptions{})
@@ -140,7 +148,9 @@ func main() {
 		}
 	}
 
+	log.Printf("Fetched %d PR files", len(files))
 	diffCtx := BuildDiffContext(files)
+	logDiffContextSummary(diffCtx)
 
 	var review string
 	var reviewComments []*github.DraftReviewComment
@@ -150,10 +160,9 @@ func main() {
 	if savedReview == nil || (forcedry != nil && *forcedry) {
 		// ask provider for review
 		if strings.EqualFold(*provider, "pi") {
-			review, reviewComments, action, err = generateReviewWithPi(pr, files, diffCtx, PiConfig{
-				RepoPath:           *repoPath,
+			review, reviewComments, action, err = generateReviewWithPi(pr, files, diffCtx, relatedIssues, PiConfig{
 				ContainerRepoPath:  *containerRepoPath,
-				Image:              *piImage,
+				ContainerName:      *piContainer,
 				Thinking:           *piThinking,
 				Model:              *piModel,
 				UseCodeGraph:       *useCodeGraph,
@@ -184,6 +193,7 @@ func main() {
 
 	if *dryRun || *forcedry {
 		// Save the review to a file during dry run or after force
+		log.Printf("Saving dry-run review to %s", reviewFilePath)
 		err = saveReviewToFile(reviewFilePath, review, reviewComments, action)
 		if err != nil {
 			log.Printf("Error saving review to file: %v\n", err)
@@ -239,6 +249,20 @@ func main() {
 		}
 		fmt.Println("Review posted successfully!")
 	}
+}
+
+func logDiffContextSummary(diffCtx *PullRequestDiffContext) {
+	if diffCtx == nil {
+		log.Println("Diff context: unavailable")
+		return
+	}
+	files := 0
+	validLines := 0
+	for _, fd := range diffCtx.Files {
+		files++
+		validLines += len(fd.ChangedLines)
+	}
+	log.Printf("Diff context: files=%d valid_inline_lines=%d", files, validLines)
 }
 
 func logSavedReview(savedReview *SavedReview) {

@@ -5,9 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -15,9 +15,8 @@ import (
 )
 
 type PiConfig struct {
-	RepoPath          string
 	ContainerRepoPath string
-	Image             string
+	ContainerName     string
 	Thinking          string
 	Model             string
 	UseCodeGraph      bool
@@ -35,42 +34,42 @@ type StructuredReview struct {
 	Confidence     string `json:"confidence"`
 }
 
-func generateReviewWithPi(pr *github.PullRequest, files []*github.CommitFile, diffCtx *PullRequestDiffContext, cfg PiConfig) (string, []*github.DraftReviewComment, string, error) {
+func generateReviewWithPi(pr *github.PullRequest, files []*github.CommitFile, diffCtx *PullRequestDiffContext, relatedIssues []RelatedIssueContext, cfg PiConfig) (string, []*github.DraftReviewComment, string, error) {
 	if pr == nil {
 		return "", nil, "", fmt.Errorf("no pull request to process")
-	}
-	if cfg.RepoPath == "" {
-		cfg.RepoPath = "."
 	}
 	if cfg.ContainerRepoPath == "" {
 		cfg.ContainerRepoPath = "/root/workspace"
 	}
-	if cfg.Image == "" {
-		cfg.Image = "pi-sandbox:latest"
+	if cfg.ContainerName == "" {
+		cfg.ContainerName = "pi-sandbox"
 	}
 	if cfg.Thinking == "" {
 		cfg.Thinking = "high"
 	}
 
-	absRepo, err := filepath.Abs(cfg.RepoPath)
-	if err != nil {
-		return "", nil, "", err
-	}
+	log.Printf("Pi reviewer: using container=%q workdir=%q thinking=%q model=%q codegraph=%v", cfg.ContainerName, cfg.ContainerRepoPath, cfg.Thinking, cfg.Model, cfg.UseCodeGraph)
+	log.Printf("Pi reviewer: PR title=%q files=%d related_issues=%d", pr.GetTitle(), len(files), len(relatedIssues))
 
-	codeGraphContext := "CodeGraph disabled."
+	codeGraphContext := "CodeGraph disabled by reviewer. Do not run CodeGraph."
 	if cfg.UseCodeGraph {
-		codeGraphContext = buildCodeGraphContext(absRepo, cfg, pr, files)
+		codeGraphContext = "Use /skill:codegraph if available. CodeGraph is available inside the Pi container. Use it for affected-scope context only. Use the bash tool to run bounded CodeGraph commands only if useful, for example: codegraph status; codegraph sync .; codegraph affected <changed-file>; codegraph context \"review PR ...\" --format=markdown --max-nodes=20. If CodeGraph is not initialized or a command fails, mention that briefly and continue without it."
+		log.Printf("Pi reviewer: CodeGraph prefetch disabled; Pi may invoke /skill:codegraph and CodeGraph via bash")
+	} else {
+		log.Printf("Pi reviewer: CodeGraph disabled")
 	}
 
-	prompt, err := buildPiReviewPrompt(pr, files, diffCtx, codeGraphContext)
+	prompt, err := buildPiReviewPrompt(pr, files, diffCtx, relatedIssues, codeGraphContext)
 	if err != nil {
 		return "", nil, "", err
 	}
 
-	output, err := runPiPromptInDocker(absRepo, cfg, prompt)
+	log.Printf("Pi reviewer: prompt built (%d chars); invoking pi in container", len(prompt))
+	output, err := runPiPromptInContainer(cfg, prompt)
 	if err != nil {
 		return "", nil, "", err
 	}
+	log.Printf("Pi reviewer: pi returned output (%d chars)", len(output))
 
 	structured, err := parseStructuredReview(output)
 	if err != nil {
@@ -88,6 +87,7 @@ func generateReviewWithPi(pr *github.PullRequest, files []*github.CommitFile, di
 		comments = append(comments, &github.DraftReviewComment{Path: &path, Line: &line, Body: &body})
 	}
 	comments, dropped := ValidateReviewComments(comments, diffCtx)
+	log.Printf("Pi reviewer: parsed recommendation=%q confidence=%q inline_comments=%d dropped_invalid=%d", structured.Recommendation, structured.Confidence, len(comments), dropped)
 	if dropped > 0 {
 		structured.BodyMarkdown += fmt.Sprintf("\n\n_Note: dropped %d invalid or duplicate inline comment(s) that did not target valid changed PR lines._", dropped)
 	}
@@ -96,7 +96,7 @@ func generateReviewWithPi(pr *github.PullRequest, files []*github.CommitFile, di
 	return structured.BodyMarkdown, comments, action, nil
 }
 
-func buildPiReviewPrompt(pr *github.PullRequest, files []*github.CommitFile, diffCtx *PullRequestDiffContext, codeGraphContext string) (string, error) {
+func buildPiReviewPrompt(pr *github.PullRequest, files []*github.CommitFile, diffCtx *PullRequestDiffContext, relatedIssues []RelatedIssueContext, codeGraphContext string) (string, error) {
 	type promptFile struct {
 		Path   string `json:"path"`
 		Status string `json:"status"`
@@ -108,9 +108,10 @@ func buildPiReviewPrompt(pr *github.PullRequest, files []*github.CommitFile, dif
 		Author         string       `json:"author"`
 		BaseSHA        string       `json:"base_sha"`
 		HeadSHA        string       `json:"head_sha"`
-		ValidLineTable string       `json:"valid_line_table"`
-		Files          []promptFile `json:"files"`
-		CodeGraph      string       `json:"codegraph_affected_scope"`
+		ValidLineTable string                `json:"valid_line_table"`
+		RelatedIssues  []RelatedIssueContext `json:"related_issues"`
+		Files          []promptFile          `json:"files"`
+		CodeGraph      string                `json:"codegraph_affected_scope"`
 	}{
 		Title:          pr.GetTitle(),
 		Body:           pr.GetBody(),
@@ -118,6 +119,7 @@ func buildPiReviewPrompt(pr *github.PullRequest, files []*github.CommitFile, dif
 		BaseSHA:        pr.GetBase().GetSHA(),
 		HeadSHA:        pr.GetHead().GetSHA(),
 		ValidLineTable: diffCtx.ValidLineSummary(),
+		RelatedIssues:  relatedIssues,
 		CodeGraph:      codeGraphContext,
 	}
 	for _, file := range files {
@@ -143,7 +145,9 @@ Return ONLY strict JSON with this schema:
 Rules:
 - Inline comments may target ONLY the valid added lines listed in valid_line_table.
 - Do not invent line numbers.
-- Use CodeGraph affected scope to explain blast radius, affected tests, callers/callees, and risk.
+- Read the PR title/body and any related issue descriptions. Use them to explain intent, acceptance criteria, and user impact.
+- Use CodeGraph affected scope to explain blast radius, affected tests, callers/callees, and risk when available.
+- If instructed that CodeGraph is available, you may use bash to run at most 5 bounded codegraph commands. Do not spend excessive time on CodeGraph; continue if unavailable.
 - Prefer recommendation "comment" for author/self-review style output unless there is a concrete blocker.
 - If CI/test status is unknown, mention tests to run instead of claiming tests passed.
 
@@ -151,22 +155,20 @@ Input JSON:
 ` + string(data), nil
 }
 
-func runPiPromptInDocker(absRepo string, cfg PiConfig, prompt string) (string, error) {
+func runPiPromptInContainer(cfg PiConfig, prompt string) (string, error) {
 	args := []string{
-		"run", "--rm",
-		"-v", fmt.Sprintf("%s:%s:rw", absRepo, cfg.ContainerRepoPath),
-		"-e", "PI_PROJECT_DIR=" + cfg.ContainerRepoPath,
+		"exec", "-i",
 		"-w", cfg.ContainerRepoPath,
+		"-e", "PI_PROJECT_DIR=" + cfg.ContainerRepoPath,
+		cfg.ContainerName,
+		"pi", "-p", "--no-session", "--tools", "read,grep,find,ls,bash", "--thinking", cfg.Thinking,
 	}
-	if envFileExists(filepath.Join(absRepo, ".env")) {
-		args = append(args, "--env-file", filepath.Join(absRepo, ".env"))
-	}
-	args = append(args, cfg.Image, "pi", "-p", "--no-session", "--tools", "read,grep,find,ls", "--thinking", cfg.Thinking)
 	if cfg.Model != "" {
 		args = append(args, "--model", cfg.Model)
 	}
 	args = append(args, "Return the requested strict JSON for the PR review. Read the prompt from stdin.")
 
+	log.Printf("Pi reviewer: docker %s", shellQuoteArgs(args))
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "docker", args...)
@@ -176,49 +178,21 @@ func runPiPromptInDocker(absRepo string, cfg PiConfig, prompt string) (string, e
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("dockerized pi failed: %w\nstderr:\n%s", err, stderr.String())
+		return "", fmt.Errorf("docker exec pi failed against container %q: %w\nstderr:\n%s", cfg.ContainerName, err, stderr.String())
 	}
 	return stdout.String(), nil
 }
 
-func buildCodeGraphContext(absRepo string, cfg PiConfig, pr *github.PullRequest, files []*github.CommitFile) string {
-	var b strings.Builder
-	status, err := runToolInDocker(absRepo, cfg, "codegraph", "status")
-	if err != nil {
-		return fmt.Sprintf("CodeGraph unavailable or uninitialized: %v", err)
-	}
-	fmt.Fprintf(&b, "## codegraph status\n%s\n", status)
-	_, _ = runToolInDocker(absRepo, cfg, "codegraph", "sync", ".")
-
-	changed := make([]string, 0, len(files))
-	for _, file := range files {
-		if file == nil || file.Filename == nil {
-			continue
-		}
-		changed = append(changed, file.GetFilename())
-		out, err := runToolInDocker(absRepo, cfg, "codegraph", "affected", file.GetFilename())
-		if err == nil && strings.TrimSpace(out) != "" {
-			fmt.Fprintf(&b, "\n## affected %s\n%s\n", file.GetFilename(), out)
-		}
-	}
-	ctxQuery := fmt.Sprintf("review PR %s changed files %s", pr.GetTitle(), strings.Join(changed, ", "))
-	out, err := runToolInDocker(absRepo, cfg, "codegraph", "context", ctxQuery, "--format=markdown", "--max-nodes=30")
-	if err == nil && strings.TrimSpace(out) != "" {
-		fmt.Fprintf(&b, "\n## task context\n%s\n", out)
-	}
-	return b.String()
-}
-
-func runToolInDocker(absRepo string, cfg PiConfig, tool string, args ...string) (string, error) {
+func runToolInContainer(cfg PiConfig, tool string, args ...string) (string, error) {
 	dockerArgs := []string{
-		"run", "--rm",
-		"-v", fmt.Sprintf("%s:%s:rw", absRepo, cfg.ContainerRepoPath),
-		"-e", "PI_PROJECT_DIR=" + cfg.ContainerRepoPath,
+		"exec", "-i",
 		"-w", cfg.ContainerRepoPath,
-		cfg.Image,
+		"-e", "PI_PROJECT_DIR=" + cfg.ContainerRepoPath,
+		cfg.ContainerName,
 		tool,
 	}
 	dockerArgs = append(dockerArgs, args...)
+	log.Printf("CodeGraph: docker %s", shellQuoteArgs(dockerArgs))
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "docker", dockerArgs...)
@@ -227,7 +201,7 @@ func runToolInDocker(absRepo string, cfg PiConfig, tool string, args ...string) 
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("%s failed: %w: %s", tool, err, stderr.String())
+		return "", fmt.Errorf("docker exec %s failed against container %q: %w: %s", tool, cfg.ContainerName, err, stderr.String())
 	}
 	return stdout.String(), nil
 }
@@ -255,6 +229,22 @@ func parseStructuredReview(output string) (*StructuredReview, error) {
 	return &review, nil
 }
 
+func shellQuoteArgs(args []string) string {
+	quoted := make([]string, len(args))
+	for i, arg := range args {
+		if strings.ContainsAny(arg, " \t\n\"'") {
+			quoted[i] = strconvQuote(arg)
+		} else {
+			quoted[i] = arg
+		}
+	}
+	return strings.Join(quoted, " ")
+}
+
+func strconvQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
 func normalizeRecommendation(recommendation, confidence string) string {
 	rec := strings.ToLower(strings.TrimSpace(recommendation))
 	conf := strings.ToLower(strings.TrimSpace(confidence))
@@ -271,7 +261,3 @@ func normalizeRecommendation(recommendation, confidence string) string {
 	}
 }
 
-func envFileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
-}

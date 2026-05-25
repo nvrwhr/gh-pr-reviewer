@@ -15,28 +15,29 @@ See `PLAN.md` for the active migration plan.
 
 ## Runtime Assumptions
 
-Pi is not run directly on the host for this project. Use the sandbox container shape below:
+Pi is not run directly on the host for this project. The Pi/CodeGraph container is started independently and the Go CLI connects to it with `docker exec`.
+
+Start the container with a stable name:
 
 ```bash
 export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*"
-ABS_PROJECT="$(pwd)/."
+ABS_PROJECT="$(pwd)"
 
-docker run --rm \
-  -v "${ABS_PROJECT}:/root/workspace:rw" \
-  -e PI_PROJECT_DIR=/root/workspace \
-  -w /root/workspace \
-  pi-sandbox:latest \
-  pi -p --no-session --tools read,grep,find,ls --thinking high "<prompt>"
-```
-
-Interactive/manual launcher equivalent:
-
-```bash
 docker run -it --rm \
+  --name pi-sandbox \
   -v "${ABS_PROJECT}:/root/workspace:rw" \
   -e PI_PROJECT_DIR=/root/workspace \
   -w /root/workspace \
   pi-sandbox:latest
+```
+
+The reviewer invokes tools inside that running container, e.g.:
+
+```bash
+docker exec -i -w /root/workspace \
+  -e PI_PROJECT_DIR=/root/workspace \
+  pi-sandbox \
+  pi -p --no-session --tools read,grep,find,ls,bash --thinking high "<prompt>"
 ```
 
 Prefer baking required tools into `pi-sandbox:latest`:
@@ -46,7 +47,7 @@ Prefer baking required tools into `pi-sandbox:latest`:
 - optional TypeScript/Node review runner
 - any helper CLIs needed for review generation
 
-Do not rely on host-installed Pi or CodeGraph for the final implementation.
+Do not rely on host-installed Pi or CodeGraph for the final implementation. Do not start a new container per review; use the already-running container. Do not mount any extra directories from the reviewer process; assume the container was started on top of the project and `/root/workspace` is already the mounted project.
 
 ## High-Priority Implementation Rules
 
@@ -70,7 +71,7 @@ Do not rely on host-installed Pi or CodeGraph for the final implementation.
    - If CodeGraph is missing/uninitialized, warn and continue without it.
 
 3. Pi must receive bounded, structured context.
-   - Include PR metadata, CI status, raw patch, parsed valid line map, and CodeGraph affected scope.
+   - Include PR metadata, related issue descriptions when referenced, CI status, raw patch, parsed valid line map, and CodeGraph affected scope.
    - Tell Pi inline comments may target only provided valid lines.
    - Prefer strict JSON output over free-form markdown parsing.
 
