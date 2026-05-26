@@ -44,7 +44,7 @@ func main() {
 	containerRepoPath := flag.String("container-repo-path", "/root/workspace", "Repository path inside the Pi container")
 	piModel := flag.String("model", "", "Pi model pattern/id")
 	piThinking := flag.String("thinking", "high", "Pi thinking level")
-	useCodeGraph := flag.Bool("codegraph", true, "Use CodeGraph affected-scope context when provider=pi")
+	useCodeGraph := flag.Bool("codegraph", false, "Enable optional CodeGraph affected-scope context when provider=pi")
 	flag.Parse()
 
 	// Check required arguments

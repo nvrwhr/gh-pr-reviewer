@@ -54,15 +54,13 @@ func generateReviewWithPi(pr *github.PullRequest, files []*github.CommitFile, di
 	log.Printf("Pi reviewer: using container=%q workdir=%q thinking=%q model=%q codegraph=%v", cfg.ContainerName, cfg.ContainerRepoPath, cfg.Thinking, cfg.Model, cfg.UseCodeGraph)
 	log.Printf("Pi reviewer: PR title=%q files=%d related_issues=%d", pr.GetTitle(), len(files), len(relatedIssues))
 
-	codeGraphContext := "CodeGraph disabled by reviewer. Do not run CodeGraph."
 	if cfg.UseCodeGraph {
-		codeGraphContext = "Use /skill:codegraph if available. CodeGraph is available inside the Pi container. Use it for affected-scope context only. Use the bash tool to run bounded CodeGraph commands only if useful, for example: codegraph status; codegraph sync .; codegraph affected <changed-file>; codegraph context \"review PR ...\" --format=markdown --max-nodes=20. If CodeGraph is not initialized or a command fails, mention that briefly and continue without it."
-		log.Printf("Pi reviewer: CodeGraph prefetch disabled; Pi may invoke /skill:codegraph and CodeGraph via bash")
+		log.Printf("Pi reviewer: CodeGraph enabled; Pi may invoke /skill:codegraph and bounded CodeGraph commands via bash")
 	} else {
 		log.Printf("Pi reviewer: CodeGraph disabled")
 	}
 
-	prompt, err := buildPiReviewPrompt(pr, files, diffCtx, relatedIssues, codeGraphContext)
+	prompt, err := buildPiReviewPrompt(pr, files, diffCtx, relatedIssues, cfg.UseCodeGraph)
 	if err != nil {
 		return "", nil, "", err
 	}
@@ -110,22 +108,21 @@ func generateReviewWithPi(pr *github.PullRequest, files []*github.CommitFile, di
 	return structured.BodyMarkdown, comments, action, nil
 }
 
-func buildPiReviewPrompt(pr *github.PullRequest, files []*github.CommitFile, diffCtx *PullRequestDiffContext, relatedIssues []RelatedIssueContext, codeGraphContext string) (string, error) {
+func buildPiReviewPrompt(pr *github.PullRequest, files []*github.CommitFile, diffCtx *PullRequestDiffContext, relatedIssues []RelatedIssueContext, useCodeGraph bool) (string, error) {
 	type promptFile struct {
 		Path   string `json:"path"`
 		Status string `json:"status"`
 		Patch  string `json:"patch,omitempty"`
 	}
 	payload := struct {
-		Title          string       `json:"title"`
-		Body           string       `json:"body"`
-		Author         string       `json:"author"`
-		BaseSHA        string       `json:"base_sha"`
-		HeadSHA        string       `json:"head_sha"`
+		Title          string                `json:"title"`
+		Body           string                `json:"body"`
+		Author         string                `json:"author"`
+		BaseSHA        string                `json:"base_sha"`
+		HeadSHA        string                `json:"head_sha"`
 		ValidLineTable string                `json:"valid_line_table"`
 		RelatedIssues  []RelatedIssueContext `json:"related_issues"`
 		Files          []promptFile          `json:"files"`
-		CodeGraph      string                `json:"codegraph_affected_scope"`
 	}{
 		Title:          pr.GetTitle(),
 		Body:           pr.GetBody(),
@@ -134,7 +131,6 @@ func buildPiReviewPrompt(pr *github.PullRequest, files []*github.CommitFile, dif
 		HeadSHA:        pr.GetHead().GetSHA(),
 		ValidLineTable: diffCtx.ValidLineSummary(),
 		RelatedIssues:  relatedIssues,
-		CodeGraph:      codeGraphContext,
 	}
 	for _, file := range files {
 		if file == nil || file.Filename == nil {
@@ -142,31 +138,15 @@ func buildPiReviewPrompt(pr *github.PullRequest, files []*github.CommitFile, dif
 		}
 		payload.Files = append(payload.Files, promptFile{Path: file.GetFilename(), Status: file.GetStatus(), Patch: file.GetPatch()})
 	}
-	data, err := json.MarshalIndent(payload, "", "  ")
+	data, err := json.Marshal(payload)
 	if err != nil {
 		return "", err
 	}
 
-	return `You are helping the PR author prepare a high-quality GitHub PR review/author note.
-Return ONLY strict JSON with this schema:
-{
-  "body_markdown": "markdown summary with affected areas, risks, tests to run, and notes",
-  "inline_comments": [{"path":"file", "line":123, "body":"comment", "severity":"bug|risk|nit|question"}],
-  "recommendation": "approve|request_changes|comment",
-  "confidence": "low|medium|high"
-}
-
-Rules:
-- Inline comments may target ONLY the valid added lines listed in valid_line_table.
-- Do not invent line numbers.
-- Read the PR title/body and any related issue descriptions. Use them to explain intent, acceptance criteria, and user impact.
-- Use CodeGraph affected scope to explain blast radius, affected tests, callers/callees, and risk when available.
-- If instructed that CodeGraph is available, you may use bash to run at most 5 bounded codegraph commands. Do not spend excessive time on CodeGraph; continue if unavailable.
-- Prefer recommendation "comment" for author/self-review style output unless there is a concrete blocker.
-- If CI/test status is unknown, mention tests to run instead of claiming tests passed.
-
-Input JSON:
-` + string(data), nil
+	return renderPiReviewPrompt(piReviewPromptTemplateData{
+		UseCodeGraph: useCodeGraph,
+		InputJSON:    string(data),
+	})
 }
 
 func savePiPrompt(pr *github.PullRequest, prompt string) (string, error) {

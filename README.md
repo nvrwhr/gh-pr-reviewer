@@ -57,7 +57,7 @@ Useful Pi/Docker flags:
 -container-repo-path=/root/workspace # mounted project path inside that container
 -model=<pi-model-pattern>
 -thinking=off|minimal|low|medium|high|xhigh
--codegraph=true|false
+-codegraph=true|false            # default false; enable optional CodeGraph context
 ```
 
 ## Dry/ForceDry Flags

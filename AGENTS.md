@@ -57,7 +57,7 @@ Do not rely on host-installed Pi or CodeGraph for the final implementation. Do n
    - Build an explicit valid inline-comment line map per file.
    - Validate every generated inline comment against this map before saving/posting.
 
-2. CodeGraph is for affected scope.
+2. CodeGraph is for affected scope and should be optional at runtime.
    - Use it to identify impacted symbols, callers/callees, dependent files, and affected tests.
    - Good commands:
      - `codegraph status`
